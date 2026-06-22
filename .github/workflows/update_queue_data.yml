@@ -1,0 +1,44 @@
+name: Update queue data
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Taiwan 09:30 = UTC 01:30
+    - cron: "30 1 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install chromium
+
+      - name: Update queue data
+        run: |
+          python build_project_links.py
+          python scrape_all_detail_lists.py
+          python analyze_queue_progress.py
+          python build_event_log.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add project_links.csv detail_queue_records.csv detail_queue_stats.csv detail_queue_stats_history.csv queue_progress_analysis.csv queue_event_log.csv
+          git diff --cached --quiet || git commit -m "Update queue data"
+          git push
