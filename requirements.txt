@@ -1,3 +1,11 @@
 streamlit
+
 pandas
+
 openpyxl
+
+playwright
+
+beautifulsoup4
+
+requests
