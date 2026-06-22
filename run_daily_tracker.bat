@@ -1,6 +1,10 @@
 @echo off
 setlocal EnableExtensions
 
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+
 set "PROJECT_DIR=%~dp0"
 set "PYTHON_EXE=python"
 set "LOG_DIR=%PROJECT_DIR%logs"
@@ -15,48 +19,84 @@ set "LATEST_LOG=%LOG_DIR%\latest_daily_tracker.log"
 cd /d "%PROJECT_DIR%"
 
 call :log "=============================="
-call :log "台中社宅候補追蹤工具：每日自動更新"
-call :log "執行時間：%RUN_ID%"
-call :log "專案資料夾：%PROJECT_DIR%"
+call :log "Social Housing Tracker: Daily Update"
+call :log "Run ID: %RUN_ID%"
+call :log "Project Dir: %PROJECT_DIR%"
+call :log "Python: %PYTHON_EXE%"
 call :log "=============================="
 
-call :run_step "1/5 抓取詳細候補名冊" scrape_all_detail_lists.py
+call :run_step "1/5 Scrape detail queue lists" scrape_all_detail_lists.py
 if errorlevel 1 goto error
 
-call :run_step "2/5 分析遞補進度" analyze_queue_progress.py
+call :run_step "2/5 Analyze queue progress" analyze_queue_progress.py
 if errorlevel 1 goto error
 
-call :run_step "3/5 建立名冊變動事件" build_event_log.py
+call :run_step "3/5 Build event log" build_event_log.py
 if errorlevel 1 goto error
 
-call :run_step "4/5 產生每日摘要" generate_daily_summary.py
+call :run_step "4/5 Generate daily summary" generate_daily_summary.py
 if errorlevel 1 goto error
 
-call :run_step "5/5 傳送 LINE 通知" send_line_summary.py
-if errorlevel 1 goto error
+call :log ""
+call :log "[5/5 Send LINE summary]"
 
-call :log "全部流程完成。"
+if not exist "send_line_summary.py" (
+    call :log "Skip LINE: send_line_summary.py not found"
+    goto success
+)
+
+if "%LINE_CHANNEL_ACCESS_TOKEN%"=="" (
+    call :log "Skip LINE: LINE_CHANNEL_ACCESS_TOKEN is not set"
+    goto success
+)
+
+if "%LINE_RECIPIENT_ID%"=="" (
+    call :log "Skip LINE: LINE_RECIPIENT_ID is not set"
+    goto success
+)
+
+"%PYTHON_EXE%" send_line_summary.py >> "%LOG_FILE%" 2>&1
+if errorlevel 1 goto error
+call :log "Done: send_line_summary.py"
+
+:success
+call :log ""
+call :log "Daily update completed."
 copy /y "%LOG_FILE%" "%LATEST_LOG%" >nul
 
+forfiles /p "%LOG_DIR%" /m daily_tracker_*.log /d -30 /c "cmd /c del @path" >nul 2>&1
+
 exit /b 0
+
 
 :run_step
 call :log ""
 call :log "[%~1]"
-%PYTHON_EXE% "%~2" >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-    call :log "失敗：%~2"
+
+if not exist "%~2" (
+    call :log "ERROR: file not found: %~2"
     exit /b 1
 )
-call :log "完成：%~2"
+
+"%PYTHON_EXE%" "%~2" >> "%LOG_FILE%" 2>&1
+
+if errorlevel 1 (
+    call :log "ERROR: failed: %~2"
+    exit /b 1
+)
+
+call :log "Done: %~2"
 exit /b 0
+
 
 :log
 echo [%date% %time%] %~1
 echo [%date% %time%] %~1>> "%LOG_FILE%"
 exit /b 0
 
+
 :error
-call :log "發生錯誤，已停止後續流程。"
+call :log ""
+call :log "ERROR: workflow stopped."
 copy /y "%LOG_FILE%" "%LATEST_LOG%" >nul
 exit /b 1
