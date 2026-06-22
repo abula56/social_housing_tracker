@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local data
+my_applications.csv
+my_application_estimates.csv
+detail_queue_records.csv
+detail_queue_stats.csv
+detail_queue_stats_history.csv
+queue_progress_analysis.csv
+
+# Backups
+backup/
+*.bak
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Browser / Playwright cache if any
+.playwright/
