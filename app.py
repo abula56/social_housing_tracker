@@ -949,12 +949,21 @@ def build_status_detail(
 ) -> pd.DataFrame:
     """
     官方整體遞補統計。
-    這不是首頁主表，只放在詳細資料區。
+    這不是首頁主表，只放在官方資料區。
+
+    public starter 版可能讀到舊版 CSV。
+    若缺少 KEY_COLUMNS，例如「遞補類型」，不要讓 app crash；
+    直接回傳目前可用欄位，並略過最近期間速度合併。
     """
     if status_df.empty:
         return pd.DataFrame()
 
     detail_df = add_processed_count(status_df)
+
+    missing_key_columns = [col for col in KEY_COLUMNS if col not in detail_df.columns]
+
+    if missing_key_columns:
+        return detail_df
 
     if selected_period_label != "營運以來" and not history_df.empty:
         speed_rows = []
@@ -987,15 +996,14 @@ def build_status_detail(
 
         speed_df = pd.DataFrame(speed_rows)
 
-        detail_df = detail_df.merge(
-            speed_df,
-            on=KEY_COLUMNS,
-            how="left",
-        )
+        if not speed_df.empty and all(col in speed_df.columns for col in KEY_COLUMNS):
+            detail_df = detail_df.merge(
+                speed_df,
+                on=KEY_COLUMNS,
+                how="left",
+            )
 
     return detail_df
-
-
 # =========================
 # 載入資料
 # =========================
