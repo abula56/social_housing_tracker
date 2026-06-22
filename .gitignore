@@ -5,16 +5,27 @@ __pycache__/
 venv/
 env/
 
-# Streamlit
+# Environment / secrets
+.env
+
+# Streamlit secrets
 .streamlit/secrets.toml
 
-# Local data
+# Local private data
 my_applications.csv
 my_application_estimates.csv
+
+# Generated queue data
 detail_queue_records.csv
 detail_queue_stats.csv
 detail_queue_stats_history.csv
 queue_progress_analysis.csv
+queue_event_log.csv
+daily_queue_summary.txt
+
+# Logs
+logs/
+*.log
 
 # Backups
 backup/
@@ -23,9 +34,6 @@ backup/
 # System files
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
 
 # Browser / Playwright cache if any
 .playwright/
