@@ -4,6 +4,25 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from constants import (
+    KEY_COLUMNS,
+    PRIORITY_ORDER,
+    PERIOD_OPTIONS,
+)
+
+from utils import (
+    add_processed_count,
+    append_note,
+    available_columns,
+    format_date,
+    format_number,
+    get_data_date,
+    latest_row_by_date,
+    read_csv_if_exists,
+    to_number,
+    to_timestamp,
+)
+
 
 # =========================
 # 基本設定
@@ -19,22 +38,7 @@ STATS_HISTORY_FILE = BASE_DIR / "detail_queue_stats_history.csv"
 PROGRESS_FILE = BASE_DIR / "queue_progress_analysis.csv"
 METADATA_FILE = BASE_DIR / "project_metadata.csv"
 
-KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
-
 # 用於保守估算：若我的名冊是「隨到隨辦」，同案場同房型同戶別的「新案場招租」通常應先處理。
-PRIORITY_ORDER = {
-    "新案場招租": 1,
-    "隨到隨辦": 2,
-}
-
-PERIOD_OPTIONS = {
-    "營運以來": None,
-    "最近一個月": 30,
-    "最近三個月": 90,
-    "最近六個月": 180,
-    "最近一年": 365,
-}
-
 
 st.set_page_config(
     page_title="社宅候補追蹤工具",
@@ -47,12 +51,6 @@ st.title("社宅候補追蹤工具")
 # =========================
 # 讀寫資料
 # =========================
-
-def read_csv_if_exists(file_path: Path, columns=None) -> pd.DataFrame:
-    if file_path.exists():
-        return pd.read_csv(file_path)
-    return pd.DataFrame(columns=columns or [])
-
 
 def load_project_links() -> pd.DataFrame:
     return read_csv_if_exists(
@@ -117,64 +115,6 @@ def load_history() -> pd.DataFrame:
 # =========================
 # 通用工具函式
 # =========================
-
-def available_columns(df: pd.DataFrame, columns: list[str]) -> list[str]:
-    return [col for col in columns if col in df.columns]
-
-
-def to_number(value):
-    return pd.to_numeric(value, errors="coerce")
-
-
-def to_timestamp(value):
-    return pd.to_datetime(value, errors="coerce")
-
-
-def format_number(value, digits: int = 1):
-    if pd.isna(value) or value is None:
-        return None
-
-    try:
-        value = float(value)
-    except Exception:
-        return value
-
-    if abs(value - round(value)) < 0.000001:
-        return int(round(value))
-
-    return round(value, digits)
-
-
-def format_date(value):
-    if pd.isna(value) or value is None:
-        return None
-
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        return None
-
-    return parsed.strftime("%Y-%m-%d")
-
-
-def add_processed_count(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    確保資料裡有「已處理人數」。
-
-    已處理人數 = 已遞補人數 + 已放棄人數
-    """
-    if df.empty:
-        return df
-
-    df = df.copy()
-
-    if "已處理人數" not in df.columns:
-        if "已遞補人數" in df.columns and "已放棄人數" in df.columns:
-            df["已遞補人數"] = pd.to_numeric(df["已遞補人數"], errors="coerce")
-            df["已放棄人數"] = pd.to_numeric(df["已放棄人數"], errors="coerce")
-            df["已處理人數"] = df["已遞補人數"] + df["已放棄人數"]
-
-    return df
-
 
 def filter_by_key(df: pd.DataFrame, project_name, queue_type, room_type, household_type) -> pd.DataFrame:
     if df.empty:
@@ -282,35 +222,6 @@ def get_conservative_speed_status_rows(
     ].drop(columns=["_priority"])
 
     return speed_rows.copy()
-
-
-def latest_row_by_date(df: pd.DataFrame) -> pd.Series | None:
-    if df.empty:
-        return None
-
-    df = df.copy()
-
-    if "抓取日期" in df.columns:
-        df["抓取日期"] = pd.to_datetime(df["抓取日期"], errors="coerce")
-        df = df.sort_values("抓取日期")
-
-    return df.iloc[-1]
-
-
-def get_data_date(status_rows: pd.DataFrame, history_rows: pd.DataFrame):
-    dates = []
-
-    if not status_rows.empty and "抓取日期" in status_rows.columns:
-        dates.extend(pd.to_datetime(status_rows["抓取日期"], errors="coerce").dropna().tolist())
-
-    if not history_rows.empty and "抓取日期" in history_rows.columns:
-        dates.extend(pd.to_datetime(history_rows["抓取日期"], errors="coerce").dropna().tolist())
-
-    if not dates:
-        return pd.Timestamp(date.today())
-
-    return max(dates).normalize()
-
 
 # =========================
 # 估算函式
@@ -586,16 +497,6 @@ def estimate_one_application(
     result["備註"] = append_note(result["備註"], speed_note)
 
     return result
-
-
-def append_note(original_note, new_note):
-    if not new_note:
-        return original_note if pd.notna(original_note) else ""
-
-    if pd.isna(original_note) or str(original_note).strip() == "":
-        return new_note
-
-    return f"{original_note}；{new_note}"
 
 
 def build_dashboard(

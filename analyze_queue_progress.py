@@ -1,13 +1,11 @@
 from pathlib import Path
 import pandas as pd
+from constants import KEY_COLUMNS
 
 BASE_DIR = Path(__file__).parent
 
 STATS_HISTORY_FILE = BASE_DIR / "detail_queue_stats_history.csv"
 OUTPUT_FILE = BASE_DIR / "queue_progress_analysis.csv"
-
-KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
-
 
 def load_stats_history():
     if not STATS_HISTORY_FILE.exists():

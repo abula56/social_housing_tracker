@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 from pathlib import Path
 import re
 import pandas as pd
+from constants import PROJECT_LINK_COLUMNS
 
 BASE_DIR = Path(__file__).parent
 
@@ -220,7 +221,7 @@ def build_project_links():
 
     df = pd.DataFrame(
         records,
-        columns=["社會住宅", "遞補類型", "名冊網址"],
+        columns=PROJECT_LINK_COLUMNS,
     )
 
     df.to_csv(

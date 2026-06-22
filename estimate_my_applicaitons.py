@@ -28,19 +28,18 @@ from typing import Iterable
 
 import pandas as pd
 
+from constants import (
+    KEY_COLUMNS,
+    PRIORITY_ORDER,
+    PERIOD_OPTIONS,
+)
+
 
 CSV_ENCODING = "utf-8-sig"
-
-KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
 BASE_COLUMNS = ["社會住宅", "房型", "戶別"]
 
 # 數字越小，代表越可能要先被消化。
 # 目前依臺中社宅實務與你的觀察，先以「新案場招租」優先於「隨到隨辦」處理。
-PRIORITY_ORDER = {
-    "新案場招租": 1,
-    "隨到隨辦": 2,
-}
-
 
 def normalize_text_columns(df: pd.DataFrame) -> pd.DataFrame:
     """清理文字欄位前後空白，避免 merge 因空白失敗。"""

@@ -5,6 +5,8 @@ from datetime import date
 import re
 import pandas as pd
 
+from constants import KEY_COLUMNS
+
 BASE_DIR = Path(__file__).parent
 
 PROJECT_LINKS_FILE = BASE_DIR / "project_links.csv"
@@ -15,9 +17,6 @@ STATS_HISTORY_FILE = BASE_DIR / "detail_queue_stats_history.csv"
 
 ROOM_TYPES = ["一房型", "二房型", "三房型"]
 HOUSEHOLD_TYPES = ["一般戶", "關懷戶"]
-
-KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
-
 
 def wait_for_room_buttons(page):
     for _ in range(15):
