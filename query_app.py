@@ -3,12 +3,16 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from constants import PERIOD_OPTIONS
+from query_estimator import estimate_one_application
+
 
 KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
 
 RECORDS_FILE = Path("detail_queue_records.csv")
 STATS_FILE = Path("detail_queue_stats.csv")
 HISTORY_FILE = Path("detail_queue_stats_history.csv")
+METADATA_FILE = Path("project_metadata.csv")
 
 
 st.set_page_config(
@@ -160,6 +164,7 @@ def estimate_previous_roster_waiting_count(
 records_df = load_csv(RECORDS_FILE)
 stats_df = load_csv(STATS_FILE)
 history_df = load_csv(HISTORY_FILE)
+metadata_df = load_csv(METADATA_FILE)
 
 st.title("臺中社宅候補查詢工具")
 
@@ -257,6 +262,32 @@ with tab_query:
         st.divider()
         st.subheader("查詢結果")
 
+        application_row = pd.Series(
+            {
+                "社會住宅": project,
+                "遞補類型": queue_type,
+                "房型": room_type,
+                "戶別": household_type,
+                "我的候補序號": int(user_number),
+                "備註": "",
+            }
+        )
+
+        estimate_results = []
+
+        for period_label in PERIOD_OPTIONS.keys():
+            estimate_result = estimate_one_application(
+                my_row=application_row,
+                records_df=records_df,
+                status_df=stats_df,
+                metadata_df=metadata_df,
+                history_df=history_df,
+                selected_period_label=period_label,
+            )
+            estimate_results.append(estimate_result)
+
+        estimate_df = pd.DataFrame(estimate_results)
+
         col1, col2, col3 = st.columns(3)
 
         with col1:
@@ -276,6 +307,30 @@ with tab_query:
                 "保守估計前方等待",
                 "無法估算" if conservative_front is None else f"{conservative_front} 人",
             )
+
+        st.markdown("### 完整預估")
+
+        display_columns = [
+            "估算基準",
+            "狀態",
+            "本名冊前方待遞補人數",
+            "前置名冊待遞補人數",
+            "保守估計前方等待人數",
+            "平均每週推進人數",
+            "預估剩餘週數",
+            "預估遞補完成日期",
+            "資料取得日",
+            "備註",
+        ]
+
+        existing_display_columns = [
+            col for col in display_columns if col in estimate_df.columns
+        ]
+
+        st.dataframe(
+            estimate_df[existing_display_columns],
+            use_container_width=True,
+        )
 
         if matched_stats.empty:
             st.info("目前沒有找到完全對應的統計資料。")
