@@ -265,7 +265,7 @@ def scrape_all_detail_lists():
     all_stats = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         for _, project in project_links_df.iterrows():

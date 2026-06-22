@@ -161,7 +161,7 @@ def build_project_links():
     records = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         go_to_summary_page(page)
