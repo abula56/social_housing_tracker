@@ -1,229 +1,343 @@
+# -*- coding: utf-8 -*-
+"""
+estimate_my_applicaitons.py
+
+新版估算程式：支援「遞補類型」。
+注意：檔名沿用原專案的拼字 estimate_my_applicaitons.py。
+
+輸入：
+- my_applications.csv
+- detail_queue_stats.csv
+- detail_queue_records.csv
+
+輸出：
+- my_application_estimates.csv
+
+核心修正：
+1. 主鍵從 ["社會住宅", "房型", "戶別"]
+   改為 ["社會住宅", "遞補類型", "房型", "戶別"]。
+2. 對「隨到隨辦」新增保守估算：
+   若同一社宅、房型、戶別仍有「新案場招租」待遞補，
+   則將其列為「前置名冊待遞補人數」。
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
-from datetime import date
+from typing import Iterable
+
 import pandas as pd
 
-BASE_DIR = Path(__file__).parent
 
-MY_APPLICATIONS_FILE = BASE_DIR / "my_applications.csv"
-RECORDS_FILE = BASE_DIR / "detail_queue_records.csv"
-STATS_FILE = BASE_DIR / "detail_queue_stats.csv"
-METADATA_FILE = BASE_DIR / "project_metadata.csv"
-PROGRESS_FILE = BASE_DIR / "queue_progress_analysis.csv"
+CSV_ENCODING = "utf-8-sig"
 
-OUTPUT_FILE = BASE_DIR / "my_application_estimates.csv"
+KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
+BASE_COLUMNS = ["社會住宅", "房型", "戶別"]
 
-
-def load_csv(file_path):
-    if not file_path.exists():
-        raise FileNotFoundError(f"找不到檔案：{file_path}")
-
-    return pd.read_csv(file_path)
+# 數字越小，代表越可能要先被消化。
+# 目前依臺中社宅實務與你的觀察，先以「新案場招租」優先於「隨到隨辦」處理。
+PRIORITY_ORDER = {
+    "新案場招租": 1,
+    "隨到隨辦": 2,
+}
 
 
-def estimate_one_application(my_row, records_df, stats_df, metadata_df, progress_df):
-    project_name = my_row["社會住宅"]
-    room_type = my_row["房型"]
-    household_type = my_row["戶別"]
-    my_rank = int(my_row["我的候補序號"])
+def normalize_text_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """清理文字欄位前後空白，避免 merge 因空白失敗。"""
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype(str).str.strip()
+            df.loc[df[col].isin(["nan", "None", "NaT"]), col] = ""
+    return df
 
-    matched_records = records_df[
-        (records_df["社會住宅"] == project_name)
-        & (records_df["房型"] == room_type)
-        & (records_df["戶別"] == household_type)
-    ].copy()
 
-    matched_stats = stats_df[
-        (stats_df["社會住宅"] == project_name)
-        & (stats_df["房型"] == room_type)
-        & (stats_df["戶別"] == household_type)
-    ]
+def read_csv(path: str | Path) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"找不到檔案：{path}")
+    return normalize_text_columns(pd.read_csv(path, encoding=CSV_ENCODING))
 
-    matched_metadata = metadata_df[
-        metadata_df["社會住宅"] == project_name
-    ]
 
-    matched_progress = progress_df[
-        (progress_df["社會住宅"] == project_name)
-        & (progress_df["房型"] == room_type)
-        & (progress_df["戶別"] == household_type)
-    ].copy()
+def ensure_columns(df: pd.DataFrame, required: Iterable[str], filename: str) -> None:
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{filename} 缺少必要欄位：{missing}\n"
+            f"目前欄位：{list(df.columns)}"
+        )
 
-    recent_average_processed_per_week = None
-    recent_estimated_weeks = None
-    recent_estimated_date = None
 
-    if matched_records.empty:
-        return {
-            "社會住宅": project_name,
-            "房型": room_type,
-            "戶別": household_type,
-            "我的候補序號": my_rank,
-            "我的目前狀態": "找不到名冊資料",
-            "前方待遞補人數": None,
-            "已處理人數": None,
+def to_number(series: pd.Series, default: int | float = 0) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").fillna(default)
 
-            "營運以來平均每週推進人數": None,
-            "營運以來速度預估剩餘週數": None,
-            "營運以來速度預估遞補完成日期": None,
 
-            "最近4次平均推進人數": None,
-            "最近速度預估剩餘週數": None,
-            "最近速度預估遞補完成日期": None,
+def latest_snapshot(df: pd.DataFrame, key_columns: list[str]) -> pd.DataFrame:
+    """
+    若 history 或 stats 內有多日資料，只保留每組 key 最新一筆。
+    若只有單日資料，結果等於原資料。
+    """
+    df = df.copy()
 
-            "備註": "detail_queue_records.csv 找不到對應案場、房型、戶別",
+    if "抓取日期" not in df.columns:
+        return df.drop_duplicates(subset=key_columns, keep="last")
+
+    df["_抓取日期_dt"] = pd.to_datetime(df["抓取日期"], errors="coerce")
+    df = df.sort_values(["_抓取日期_dt"] + key_columns)
+    df = df.drop_duplicates(subset=key_columns, keep="last")
+    df = df.drop(columns=["_抓取日期_dt"])
+    return df
+
+
+def current_records_snapshot(records: pd.DataFrame) -> pd.DataFrame:
+    """detail_queue_records 只保留最新抓取日期。"""
+    records = records.copy()
+    if "抓取日期" not in records.columns:
+        return records
+
+    records["_抓取日期_dt"] = pd.to_datetime(records["抓取日期"], errors="coerce")
+    latest_date = records["_抓取日期_dt"].max()
+
+    if pd.isna(latest_date):
+        records = records.drop(columns=["_抓取日期_dt"])
+        return records
+
+    records = records[records["_抓取日期_dt"] == latest_date].copy()
+    records = records.drop(columns=["_抓取日期_dt"])
+    return records
+
+
+def key_filter(df: pd.DataFrame, values: pd.Series | dict, columns: list[str]) -> pd.Series:
+    mask = pd.Series(True, index=df.index)
+    for col in columns:
+        mask &= df[col].astype(str).str.strip().eq(str(values[col]).strip())
+    return mask
+
+
+def priority_rank(queue_type: str) -> int:
+    """
+    未知遞補類型放在很後面。
+    這樣不會錯把未知類型當成前置名冊。
+    """
+    return PRIORITY_ORDER.get(str(queue_type).strip(), 999)
+
+
+def build_preceding_queue_info(
+    app_row: pd.Series,
+    stats_latest: pd.DataFrame,
+) -> tuple[int, str]:
+    """
+    計算同一社會住宅、房型、戶別中，比我的遞補類型更優先的名冊仍有多少人待遞補。
+
+    例如：
+    我的名冊 = 隨到隨辦
+    同一社宅/房型/戶別的新案場招租仍有 24 人待遞補
+    => 前置名冊待遞補人數 = 24
+    """
+    current_type = str(app_row["遞補類型"]).strip()
+    current_rank = priority_rank(current_type)
+
+    if current_rank == 999:
+        return 0, "未知遞補類型，未套用前置名冊估算。"
+
+    same_base = stats_latest[key_filter(stats_latest, app_row, BASE_COLUMNS)].copy()
+    if same_base.empty:
+        return 0, "查無同案場同房型同戶別統計資料。"
+
+    same_base["_priority_rank"] = same_base["遞補類型"].map(priority_rank)
+    preceding = same_base[same_base["_priority_rank"] < current_rank].copy()
+
+    if preceding.empty:
+        return 0, "無更優先的前置名冊。"
+
+    preceding["待遞補人數"] = to_number(preceding["待遞補人數"], default=0).astype(int)
+    total = int(preceding["待遞補人數"].sum())
+
+    details = []
+    for _, row in preceding.sort_values("_priority_rank").iterrows():
+        details.append(f"{row['遞補類型']}：{int(row['待遞補人數'])} 人")
+
+    return total, "；".join(details)
+
+
+def build_one_estimate(
+    app_row: pd.Series,
+    stats_latest: pd.DataFrame,
+    records_current: pd.DataFrame,
+) -> dict:
+    result = app_row.to_dict()
+
+    my_seq = pd.to_numeric(app_row.get("我的候補序號"), errors="coerce")
+    if pd.isna(my_seq):
+        my_seq_int = None
+    else:
+        my_seq_int = int(my_seq)
+
+    # 找本名冊統計
+    stat_match = stats_latest[key_filter(stats_latest, app_row, KEY_COLUMNS)].copy()
+
+    if not stat_match.empty:
+        stat_row = stat_match.iloc[0].to_dict()
+        for col in ["抓取日期", "已遞補人數", "已放棄人數", "待遞補人數", "名冊總人數", "實際放棄率"]:
+            result[col] = stat_row.get(col, pd.NA)
+    else:
+        for col in ["抓取日期", "已遞補人數", "已放棄人數", "待遞補人數", "名冊總人數", "實際放棄率"]:
+            result[col] = pd.NA
+
+    # 找本名冊明細
+    exact_records = records_current[key_filter(records_current, app_row, KEY_COLUMNS)].copy()
+
+    if not exact_records.empty and "候補序號" in exact_records.columns:
+        exact_records["候補序號"] = to_number(exact_records["候補序號"], default=-1).astype(int)
+
+    my_status = "查無此候補序號"
+    my_record_found = False
+    same_list_ahead_pending = pd.NA
+    same_list_pending_total = pd.NA
+
+    if my_seq_int is not None and not exact_records.empty:
+        same_list_pending = exact_records[exact_records["遞補狀態"].astype(str).str.contains("待", na=False)]
+        same_list_pending_total = int(len(same_list_pending))
+
+        my_record = exact_records[exact_records["候補序號"] == my_seq_int]
+        if not my_record.empty:
+            my_record_found = True
+            my_status = str(my_record.iloc[0].get("遞補狀態", "")).strip() or "狀態空白"
+
+        same_list_ahead_pending = int(
+            len(
+                same_list_pending[
+                    same_list_pending["候補序號"] < my_seq_int
+                ]
+            )
+        )
+
+    elif my_seq_int is not None and exact_records.empty:
+        same_list_ahead_pending = pd.NA
+        same_list_pending_total = pd.NA
+
+    preceding_pending, preceding_desc = build_preceding_queue_info(app_row, stats_latest)
+
+    if my_status == "已遞補":
+        conservative_wait = 0
+    elif pd.isna(same_list_ahead_pending):
+        conservative_wait = pd.NA
+    else:
+        conservative_wait = int(same_list_ahead_pending) + int(preceding_pending)
+
+    warnings = []
+    if not stat_match.empty and not my_record_found and my_seq_int is not None:
+        warnings.append("本名冊統計存在，但明細中查無你的候補序號。請確認 my_applications.csv 的候補序號、房型、戶別、遞補類型是否完全一致。")
+    if preceding_pending > 0:
+        warnings.append("同案場同房型同戶別仍有更優先名冊待遞補；本工具將其納入保守估算。")
+    if stat_match.empty:
+        warnings.append("查無本名冊統計資料。請確認 detail_queue_stats.csv 是否已用新版爬蟲重新產生。")
+
+    if preceding_pending > 0 and my_status != "已遞補":
+        estimate_note = (
+            f"本名冊前方待遞補 {same_list_ahead_pending} 人；"
+            f"前置名冊待遞補 {preceding_pending} 人；"
+            f"保守估計前方等待 {conservative_wait} 人。"
+        )
+    elif my_status == "已遞補":
+        estimate_note = "明細顯示已遞補。"
+    else:
+        estimate_note = f"本名冊前方待遞補 {same_list_ahead_pending} 人。"
+
+    result.update(
+        {
+            "我的目前狀態": my_status,
+            "本名冊待遞補總人數": same_list_pending_total,
+            "本名冊前方待遞補人數": same_list_ahead_pending,
+            "前置名冊待遞補人數": int(preceding_pending),
+            "前置名冊說明": preceding_desc,
+            "保守估計前方等待人數": conservative_wait,
+            "估算說明": estimate_note,
+            "資料警告": "；".join(warnings),
         }
-
-    my_record = matched_records[
-        matched_records["候補序號"] == my_rank
-    ]
-
-    if my_record.empty:
-        my_status = "名冊中找不到我的序號"
-    else:
-        my_status = my_record.iloc[0]["遞補狀態"]
-
-    people_ahead_waiting = matched_records[
-        (matched_records["候補序號"] < my_rank)
-        & (matched_records["遞補狀態"] == "待遞補")
-    ]
-
-    ahead_waiting_count = len(people_ahead_waiting)
-
-    if matched_stats.empty:
-        completed_count = None
-        abandoned_count = None
-        processed_count = None
-    else:
-        stat_row = matched_stats.iloc[0]
-        completed_count = stat_row["已遞補人數"]
-        abandoned_count = stat_row["已放棄人數"]
-        processed_count = completed_count + abandoned_count
-
-    if matched_metadata.empty:
-        average_processed_per_week = None
-        estimated_weeks = None
-        estimated_date = None
-        note = "找不到 project_metadata.csv 的營運開始日"
-
-    else:
-        metadata_row = matched_metadata.iloc[0]
-        operation_start_date = pd.to_datetime(
-            metadata_row["推估用日期"],
-            errors="coerce"
-        )
-
-        if pd.isna(operation_start_date) or processed_count is None:
-            average_processed_per_week = None
-            estimated_weeks = None
-            estimated_date = None
-            note = "營運開始日或已處理人數不足，無法估算日期"
-
-        else:
-            today = pd.Timestamp(date.today())
-            days_since_start = (today - operation_start_date).days
-            weeks_since_start = days_since_start / 7
-
-            if weeks_since_start <= 0 or processed_count <= 0:
-                average_processed_per_week = None
-                estimated_weeks = None
-                estimated_date = None
-                note = "營運時間或推進人數不足，無法估算日期"
-
-            else:
-                average_processed_per_week = processed_count / weeks_since_start
-
-                if average_processed_per_week <= 0:
-                    estimated_weeks = None
-                    estimated_date = None
-                    note = "平均推進速度為 0，無法估算日期"
-
-                else:
-                    estimated_weeks = ahead_waiting_count / average_processed_per_week
-                    estimated_date = today + pd.to_timedelta(
-                        estimated_weeks,
-                        unit="W"
-                    )
-                    note = ""
-
-                if not matched_progress.empty:
-                    matched_progress["抓取日期"] = pd.to_datetime(
-                        matched_progress["抓取日期"],
-                        errors="coerce"
-                    )
-
-                    latest_progress_row = matched_progress.sort_values(
-                        "抓取日期"
-                    ).iloc[-1]
-
-                    recent_average_processed_per_week = latest_progress_row[
-                        "最近4次平均推進人數"
-                    ]
-
-                    if pd.isna(recent_average_processed_per_week) or recent_average_processed_per_week <= 0:
-                        recent_average_processed_per_week = None
-                        recent_estimated_weeks = None
-                        recent_estimated_date = None
-                    else:
-                        recent_estimated_weeks = ahead_waiting_count / recent_average_processed_per_week
-                        recent_estimated_date = today + pd.to_timedelta(
-                            recent_estimated_weeks,
-                            unit="W"
-                        )
-
-    return {
-        "社會住宅": project_name,
-        "房型": room_type,
-        "戶別": household_type,
-        "我的候補序號": my_rank,
-        "我的目前狀態": my_status,
-        "前方待遞補人數": ahead_waiting_count,
-        "已處理人數": processed_count,
-
-        "營運以來平均每週推進人數": average_processed_per_week,
-        "營運以來速度預估剩餘週數": estimated_weeks,
-        "營運以來速度預估遞補完成日期": estimated_date.strftime("%Y-%m-%d") if estimated_date is not None else None,
-
-        "最近4次平均推進人數": recent_average_processed_per_week,
-        "最近速度預估剩餘週數": recent_estimated_weeks,
-        "最近速度預估遞補完成日期": recent_estimated_date.strftime("%Y-%m-%d") if recent_estimated_date is not None else None,
-
-        "備註": note,
-    }
-
-
-def estimate_my_applications():
-    my_df = load_csv(MY_APPLICATIONS_FILE)
-    records_df = load_csv(RECORDS_FILE)
-    stats_df = load_csv(STATS_FILE)
-    metadata_df = load_csv(METADATA_FILE)
-    progress_df = load_csv(PROGRESS_FILE)
-
-    results = []
-
-    for _, my_row in my_df.iterrows():
-        result = estimate_one_application(
-            my_row,
-            records_df,
-            stats_df,
-            metadata_df,
-            progress_df
-        )
-
-        results.append(result)
-
-    result_df = pd.DataFrame(results)
-
-    result_df.to_csv(
-        OUTPUT_FILE,
-        index=False,
-        encoding="utf-8-sig"
     )
 
-    print("已產生估算結果：", OUTPUT_FILE.resolve())
-    print(result_df)
+    return result
 
-    return result_df
+
+def build_estimates(
+    my_applications_path: str | Path = "my_applications.csv",
+    stats_path: str | Path = "detail_queue_stats.csv",
+    records_path: str | Path = "detail_queue_records.csv",
+    output_path: str | Path = "my_application_estimates.csv",
+) -> pd.DataFrame:
+    apps = read_csv(my_applications_path)
+    stats = read_csv(stats_path)
+    records = read_csv(records_path)
+
+    ensure_columns(
+        apps,
+        KEY_COLUMNS + ["我的候補序號"],
+        str(my_applications_path),
+    )
+    ensure_columns(
+        stats,
+        KEY_COLUMNS + ["抓取日期", "已遞補人數", "已放棄人數", "待遞補人數", "名冊總人數"],
+        str(stats_path),
+    )
+    ensure_columns(
+        records,
+        KEY_COLUMNS + ["抓取日期", "候補序號", "遞補狀態"],
+        str(records_path),
+    )
+
+    apps["我的候補序號"] = to_number(apps["我的候補序號"], default=pd.NA)
+
+    for col in ["已遞補人數", "已放棄人數", "待遞補人數", "名冊總人數"]:
+        stats[col] = to_number(stats[col], default=0).astype(int)
+
+    stats_latest = latest_snapshot(stats, KEY_COLUMNS)
+    records_current = current_records_snapshot(records)
+
+    estimates = []
+    for _, app_row in apps.iterrows():
+        estimates.append(build_one_estimate(app_row, stats_latest, records_current))
+
+    out = pd.DataFrame(estimates)
+
+    preferred_order = [
+        "社會住宅",
+        "遞補類型",
+        "房型",
+        "戶別",
+        "我的候補序號",
+        "我的目前狀態",
+        "本名冊前方待遞補人數",
+        "前置名冊待遞補人數",
+        "保守估計前方等待人數",
+        "本名冊待遞補總人數",
+        "抓取日期",
+        "已遞補人數",
+        "已放棄人數",
+        "待遞補人數",
+        "名冊總人數",
+        "實際放棄率",
+        "前置名冊說明",
+        "估算說明",
+        "資料警告",
+        "營運開始日",
+        "備註",
+    ]
+    existing_preferred = [col for col in preferred_order if col in out.columns]
+    remaining = [col for col in out.columns if col not in existing_preferred]
+    out = out[existing_preferred + remaining]
+
+    output_path = Path(output_path)
+    out.to_csv(output_path, index=False, encoding=CSV_ENCODING)
+    return out
+
+
+def main() -> None:
+    out = build_estimates()
+    print("已產生 my_application_estimates.csv")
+    print()
+    print(out.to_string(index=False))
 
 
 if __name__ == "__main__":
-    estimate_my_applications()
+    main()

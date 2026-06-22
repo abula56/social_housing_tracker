@@ -6,41 +6,65 @@ BASE_DIR = Path(__file__).parent
 STATS_HISTORY_FILE = BASE_DIR / "detail_queue_stats_history.csv"
 OUTPUT_FILE = BASE_DIR / "queue_progress_analysis.csv"
 
+KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
+
+
 def load_stats_history():
     if not STATS_HISTORY_FILE.exists():
         raise FileNotFoundError(
-            "找不到 detail_queue_stats_history.cvs，請先執行 scrape_all_detail_lists.py"
+            "找不到 detail_queue_stats_history.csv，請先執行 scrape_all_detail_lists.py"
         )
-    
-    return pd.read_csv(STATS_HISTORY_FILE)
 
-def analyze_progess():
+    return pd.read_csv(STATS_HISTORY_FILE, encoding="utf-8-sig")
+
+
+def analyze_progress():
     history_df = load_stats_history()
 
-    history_df["抓取日期"] = pd.to_datetime(history_df["抓取日期"])
+    missing_columns = [c for c in KEY_COLUMNS if c not in history_df.columns]
+
+    if missing_columns:
+        raise ValueError(
+            "detail_queue_stats_history.csv 缺少必要欄位："
+            + ", ".join(missing_columns)
+            + "。請先更新 scrape_all_detail_lists.py，重新產生含有「遞補類型」的歷史資料。"
+        )
+
+    history_df["抓取日期"] = pd.to_datetime(history_df["抓取日期"], errors="coerce")
+
+    history_df["已遞補人數"] = pd.to_numeric(
+        history_df["已遞補人數"],
+        errors="coerce"
+    ).fillna(0)
+
+    history_df["已放棄人數"] = pd.to_numeric(
+        history_df["已放棄人數"],
+        errors="coerce"
+    ).fillna(0)
 
     history_df["已處理人數"] = (
         history_df["已遞補人數"] + history_df["已放棄人數"]
     )
 
     history_df = history_df.sort_values(
-        ["社會住宅", "房型", "戶別", "抓取日期"]
+        KEY_COLUMNS + ["抓取日期"]
     )
 
-    group_columns = ["社會住宅", "房型", "戶別"]
-
     history_df["上次已處理人數"] = history_df.groupby(
-        group_columns
+        KEY_COLUMNS
     )["已處理人數"].shift(1)
 
-    history_df["本週推進人數"] = (
+    history_df["本次推進人數"] = (
         history_df["已處理人數"] - history_df["上次已處理人數"]
     )
 
+    # 為了相容舊版 app / estimate 腳本，暫時保留這個欄名。
+    history_df["本週推進人數"] = history_df["本次推進人數"]
+
     history_df["最近4次平均推進人數"] = history_df.groupby(
-        group_columns
-    )["本週推進人數"].transform(
-        lambda s:s.rolling(window=4, min_periods=1).mean()
+        KEY_COLUMNS
+    )["本次推進人數"].transform(
+        lambda s: s.rolling(window=4, min_periods=1).mean()
     )
 
     history_df.to_csv(
@@ -49,10 +73,11 @@ def analyze_progess():
         encoding="utf-8-sig"
     )
 
-    print("以產生進度分析：", OUTPUT_FILE.resolve())
+    print("已產生進度分析：", OUTPUT_FILE.resolve())
     print(history_df.tail(20))
 
     return history_df
 
+
 if __name__ == "__main__":
-    analyze_progess()
+    analyze_progress()

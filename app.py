@@ -19,7 +19,13 @@ STATS_HISTORY_FILE = BASE_DIR / "detail_queue_stats_history.csv"
 PROGRESS_FILE = BASE_DIR / "queue_progress_analysis.csv"
 METADATA_FILE = BASE_DIR / "project_metadata.csv"
 
-KEY_COLUMNS = ["社會住宅", "房型", "戶別"]
+KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
+
+# 用於保守估算：若我的名冊是「隨到隨辦」，同案場同房型同戶別的「新案場招租」通常應先處理。
+PRIORITY_ORDER = {
+    "新案場招租": 1,
+    "隨到隨辦": 2,
+}
 
 PERIOD_OPTIONS = {
     "營運以來": None,
@@ -51,7 +57,7 @@ def read_csv_if_exists(file_path: Path, columns=None) -> pd.DataFrame:
 def load_project_links() -> pd.DataFrame:
     return read_csv_if_exists(
         PROJECT_LINKS_FILE,
-        columns=["社會住宅", "名冊網址"],
+        columns=["社會住宅", "遞補類型", "名冊網址"],
     )
 
 
@@ -60,9 +66,11 @@ def load_my_applications() -> pd.DataFrame:
         MY_APPLICATIONS_FILE,
         columns=[
             "社會住宅",
+            "遞補類型",
             "房型",
             "戶別",
             "我的候補序號",
+            "營運開始日",
             "備註",
         ],
     )
@@ -168,7 +176,7 @@ def add_processed_count(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def filter_by_key(df: pd.DataFrame, project_name, room_type, household_type) -> pd.DataFrame:
+def filter_by_key(df: pd.DataFrame, project_name, queue_type, room_type, household_type) -> pd.DataFrame:
     if df.empty:
         return df
 
@@ -178,9 +186,102 @@ def filter_by_key(df: pd.DataFrame, project_name, room_type, household_type) -> 
 
     return df[
         (df["社會住宅"] == project_name)
+        & (df["遞補類型"] == queue_type)
         & (df["房型"] == room_type)
         & (df["戶別"] == household_type)
     ].copy()
+
+def calculate_preceding_queue_waiting(
+    status_df: pd.DataFrame,
+    project_name,
+    queue_type,
+    room_type,
+    household_type,
+) -> int:
+    """
+    保守估算前置名冊待遞補人數。
+
+    例：我的申請是「隨到隨辦」時，若同社宅、同房型、同戶別仍有
+    「新案場招租」待遞補，則把它列為前置等待量。
+    """
+    if status_df.empty or "待遞補人數" not in status_df.columns:
+        return 0
+
+    required_columns = ["社會住宅", "遞補類型", "房型", "戶別", "待遞補人數"]
+    missing = [col for col in required_columns if col not in status_df.columns]
+    if missing:
+        return 0
+
+    current_priority = PRIORITY_ORDER.get(queue_type)
+    if current_priority is None:
+        return 0
+
+    candidate_rows = status_df[
+        (status_df["社會住宅"] == project_name)
+        & (status_df["房型"] == room_type)
+        & (status_df["戶別"] == household_type)
+    ].copy()
+
+    if candidate_rows.empty:
+        return 0
+
+    candidate_rows["_priority"] = candidate_rows["遞補類型"].map(PRIORITY_ORDER)
+    candidate_rows["待遞補人數"] = pd.to_numeric(
+        candidate_rows["待遞補人數"],
+        errors="coerce",
+    ).fillna(0)
+
+    preceding_rows = candidate_rows[
+        candidate_rows["_priority"].notna()
+        & (candidate_rows["_priority"] < current_priority)
+    ]
+
+    return int(preceding_rows["待遞補人數"].sum())
+
+
+def get_conservative_speed_status_rows(
+    status_df: pd.DataFrame,
+    project_name,
+    queue_type,
+    room_type,
+    household_type,
+) -> pd.DataFrame:
+    """
+    取得用來估算「保守等待量」速度的官方統計列。
+
+    若我的名冊是「隨到隨辦」，估算速度時不能只看隨到隨辦本身，
+    因為它可能要等「新案場招租」先消化。
+    因此這裡會抓同社宅、同房型、同戶別中，優先序早於或等於目前名冊的列。
+    """
+    if status_df.empty:
+        return pd.DataFrame()
+
+    required_columns = ["社會住宅", "遞補類型", "房型", "戶別"]
+    missing = [col for col in required_columns if col not in status_df.columns]
+    if missing:
+        return pd.DataFrame()
+
+    current_priority = PRIORITY_ORDER.get(queue_type)
+    if current_priority is None:
+        return filter_by_key(status_df, project_name, queue_type, room_type, household_type)
+
+    candidate_rows = status_df[
+        (status_df["社會住宅"] == project_name)
+        & (status_df["房型"] == room_type)
+        & (status_df["戶別"] == household_type)
+    ].copy()
+
+    if candidate_rows.empty:
+        return pd.DataFrame()
+
+    candidate_rows["_priority"] = candidate_rows["遞補類型"].map(PRIORITY_ORDER)
+
+    speed_rows = candidate_rows[
+        candidate_rows["_priority"].notna()
+        & (candidate_rows["_priority"] <= current_priority)
+    ].drop(columns=["_priority"])
+
+    return speed_rows.copy()
 
 
 def latest_row_by_date(df: pd.DataFrame) -> pd.Series | None:
@@ -229,8 +330,12 @@ def estimate_long_term_speed(
     if status_rows.empty:
         return None, "找不到目前官方遞補統計，無法計算營運以來速度"
 
-    status_row = latest_row_by_date(status_rows)
-    processed_count = status_row.get("已處理人數")
+    status_rows = status_rows.copy()
+    status_rows["已處理人數"] = pd.to_numeric(
+        status_rows["已處理人數"],
+        errors="coerce",
+    )
+    processed_count = status_rows["已處理人數"].sum()
 
     if pd.isna(processed_count):
         return None, "目前官方遞補統計缺少已處理人數"
@@ -339,6 +444,7 @@ def estimate_one_application(
     selected_period_label: str,
 ) -> dict:
     project_name = my_row.get("社會住宅")
+    queue_type = my_row.get("遞補類型")
     room_type = my_row.get("房型")
     household_type = my_row.get("戶別")
     my_rank = to_number(my_row.get("我的候補序號"))
@@ -346,11 +452,15 @@ def estimate_one_application(
 
     result = {
         "社宅": project_name,
+        "遞補類型": queue_type,
         "房型": room_type,
         "戶別": household_type,
         "我的序號": format_number(my_rank, digits=0),
         "狀態": None,
         "前面約剩幾位": None,
+        "本名冊前方待遞補人數": None,
+        "前置名冊待遞補人數": None,
+        "保守估計前方等待人數": None,
         "估算基準": selected_period_label,
         "平均每週推進人數": None,
         "預估剩餘週數": None,
@@ -364,9 +474,9 @@ def estimate_one_application(
         result["備註"] = append_note(result["備註"], "請確認 my_applications.csv 的我的候補序號")
         return result
 
-    matched_records = filter_by_key(records_df, project_name, room_type, household_type)
-    matched_status = filter_by_key(status_df, project_name, room_type, household_type)
-    matched_history = filter_by_key(history_df, project_name, room_type, household_type)
+    matched_records = filter_by_key(records_df, project_name, queue_type, room_type, household_type)
+    matched_status = filter_by_key(status_df, project_name, queue_type, room_type, household_type)
+    matched_history = filter_by_key(history_df, project_name, queue_type, room_type, household_type)
 
     if not metadata_df.empty and "社會住宅" in metadata_df.columns:
         matched_metadata = metadata_df[metadata_df["社會住宅"] == project_name].copy()
@@ -380,7 +490,7 @@ def estimate_one_application(
         result["狀態"] = "找不到名冊資料"
         result["備註"] = append_note(
             result["備註"],
-            "detail_queue_records.csv 找不到對應案場、房型、戶別",
+            "detail_queue_records.csv 找不到對應案場、遞補類型、房型、戶別",
         )
         return result
 
@@ -415,16 +525,45 @@ def estimate_one_application(
     ]
 
     ahead_waiting_count = len(people_ahead_waiting)
-    result["前面約剩幾位"] = ahead_waiting_count
+    preceding_queue_waiting_count = calculate_preceding_queue_waiting(
+        status_df=status_df,
+        project_name=project_name,
+        queue_type=queue_type,
+        room_type=room_type,
+        household_type=household_type,
+    )
+    conservative_ahead_count = ahead_waiting_count + preceding_queue_waiting_count
+
+    result["本名冊前方待遞補人數"] = ahead_waiting_count
+    result["前置名冊待遞補人數"] = preceding_queue_waiting_count
+    result["保守估計前方等待人數"] = conservative_ahead_count
+    result["前面約剩幾位"] = conservative_ahead_count
 
     period_days = PERIOD_OPTIONS[selected_period_label]
 
     if period_days is None:
+        speed_status_rows = get_conservative_speed_status_rows(
+            status_df=status_df,
+            project_name=project_name,
+            queue_type=queue_type,
+            room_type=room_type,
+            household_type=household_type,
+        )
+        if not speed_status_rows.empty:
+            base_date = get_data_date(speed_status_rows, matched_history)
+            result["資料取得日"] = format_date(base_date)
+
         speed, speed_note = estimate_long_term_speed(
-            status_rows=matched_status,
+            status_rows=speed_status_rows,
             metadata_rows=matched_metadata,
             base_date=base_date,
         )
+
+        if preceding_queue_waiting_count > 0:
+            speed_note = append_note(
+                speed_note,
+                "營運以來速度已改用前置名冊與本名冊合併已處理人數估算",
+            )
     else:
         speed, speed_note = estimate_recent_speed(
             history_rows=matched_history,
@@ -438,7 +577,7 @@ def estimate_one_application(
         result["備註"] = append_note(result["備註"], speed_note)
         return result
 
-    estimated_weeks = ahead_waiting_count / speed
+    estimated_weeks = conservative_ahead_count / speed
     estimated_date = base_date + pd.to_timedelta(estimated_weeks, unit="W")
 
     result["平均每週推進人數"] = format_number(speed, digits=2)
@@ -518,10 +657,14 @@ def build_period_comparison(
 
     keep_columns = [
         "社宅",
+        "遞補類型",
         "房型",
         "戶別",
         "我的序號",
         "前面約剩幾位",
+        "本名冊前方待遞補人數",
+        "前置名冊待遞補人數",
+        "保守估計前方等待人數",
         "估算基準",
         "平均每週推進人數",
         "預估剩餘週數",
@@ -552,12 +695,14 @@ def build_status_detail(
 
         for _, row in detail_df.iterrows():
             project_name = row.get("社會住宅")
+            queue_type = row.get("遞補類型")
             room_type = row.get("房型")
             household_type = row.get("戶別")
 
             matched_history = filter_by_key(
                 history_df,
                 project_name,
+                queue_type,
                 room_type,
                 household_type,
             )
@@ -567,6 +712,7 @@ def build_status_detail(
 
             speed_rows.append({
                 "社會住宅": project_name,
+                "遞補類型": queue_type,
                 "房型": room_type,
                 "戶別": household_type,
                 "所選基準平均每週推進人數": format_number(speed, digits=2),
@@ -626,11 +772,15 @@ else:
 
     dashboard_columns = [
         "社宅",
+        "遞補類型",
         "房型",
         "戶別",
         "我的序號",
         "狀態",
         "前面約剩幾位",
+        "本名冊前方待遞補人數",
+        "前置名冊待遞補人數",
+        "保守估計前方等待人數",
         "估算基準",
         "平均每週推進人數",
         "預估剩餘週數",
@@ -680,7 +830,7 @@ if project_links_df.empty:
     st.warning("找不到 project_links.csv，新增候補資料時無法提供案場選單。")
     project_options = []
 else:
-    project_options = project_links_df["社會住宅"].dropna().tolist()
+    project_options = sorted(project_links_df["社會住宅"].dropna().unique().tolist())
 
 
 with st.expander("新增候補資料", expanded=False):
@@ -699,6 +849,26 @@ with st.expander("新增候補資料", expanded=False):
 
             for project_name in selected_projects:
                 st.markdown(f"### {project_name}")
+
+                if "遞補類型" in project_links_df.columns:
+                    queue_type_options = (
+                        project_links_df[project_links_df["社會住宅"] == project_name]["遞補類型"]
+                        .dropna()
+                        .unique()
+                        .tolist()
+                    )
+                else:
+                    queue_type_options = []
+
+                if not queue_type_options:
+                    queue_type_options = ["隨到隨辦", "新案場招租"]
+
+                queue_type = st.selectbox(
+                    f"{project_name}：遞補類型",
+                    queue_type_options,
+                    index=0,
+                    key=f"queue_type_{project_name}",
+                )
 
                 room_type = st.selectbox(
                     f"{project_name}：房型",
@@ -728,9 +898,11 @@ with st.expander("新增候補資料", expanded=False):
 
                 input_records.append({
                     "社會住宅": project_name,
+                    "遞補類型": queue_type,
                     "房型": room_type,
                     "戶別": household_type,
                     "我的候補序號": int(my_rank),
+                    "營運開始日": "",
                     "備註": note,
                 })
 
@@ -761,7 +933,7 @@ with st.expander("新增候補資料", expanded=False):
 if not my_df.empty:
     with st.expander("刪除候補資料", expanded=False):
         delete_options = [
-            f"{idx}｜{row['社會住宅']}｜{row['房型']}｜{row['戶別']}｜序號 {row['我的候補序號']}"
+            f"{idx}｜{row['社會住宅']}｜{row.get('遞補類型', '')}｜{row['房型']}｜{row['戶別']}｜序號 {row['我的候補序號']}"
             for idx, row in my_df.iterrows()
         ]
 
@@ -841,6 +1013,7 @@ with st.expander("官方遞補統計", expanded=False):
 
         detail_columns = [
             "社會住宅",
+            "遞補類型",
             "房型",
             "戶別",
             "抓取日期",

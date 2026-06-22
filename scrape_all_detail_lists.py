@@ -16,19 +16,22 @@ STATS_HISTORY_FILE = BASE_DIR / "detail_queue_stats_history.csv"
 ROOM_TYPES = ["一房型", "二房型", "三房型"]
 HOUSEHOLD_TYPES = ["一般戶", "關懷戶"]
 
+KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
+
 
 def wait_for_room_buttons(page):
     for _ in range(15):
         for room_type in ROOM_TYPES:
             if page.get_by_role("button", name=room_type).count() > 0:
                 return True
-            
+
         page.wait_for_timeout(1000)
 
     return False
 
+
 def clean_text(text):
-    return re.sub(r"[\s\u3000]+", "", text)
+    return re.sub(r"[\s\u3000]+", "", str(text))
 
 
 def extract_number_from_rank(rank_text):
@@ -44,7 +47,19 @@ def load_project_links():
     if not PROJECT_LINKS_FILE.exists():
         raise FileNotFoundError("找不到 project_links.csv，請先執行 build_project_links.py")
 
-    return pd.read_csv(PROJECT_LINKS_FILE)
+    df = pd.read_csv(PROJECT_LINKS_FILE, encoding="utf-8-sig")
+
+    required_columns = ["社會住宅", "遞補類型", "名冊網址"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        raise ValueError(
+            "project_links.csv 缺少必要欄位："
+            + ", ".join(missing_columns)
+            + "。請先用新版 build_project_links.py 重新產生 project_links.csv。"
+        )
+
+    return df
 
 
 def click_filter(page, text):
@@ -53,20 +68,49 @@ def click_filter(page, text):
     if button.count() == 0:
         print(f"找不到按鈕：{text}")
         return False
-    
+
     button.click(force=True)
-    page.wait_for_timeout(1500)
+
+    # 官方頁面是前端動態切換，太快抓會抓到上一個房型或戶別。
+    page.wait_for_timeout(2500)
+
     return True
 
-def parse_detail_table(page, project_name, room_type, household_type):
-    html = page.content()
-    soup = BeautifulSoup(html, "html.parser")
 
-    tables = soup.find_all("table")
+def get_visible_tables(page):
+    """
+    只解析目前畫面可見的 table，避免抓到 DOM 中隱藏的舊表格。
+    """
+    try:
+        visible_tables_html = page.locator("table:visible").evaluate_all(
+            "(tables) => tables.map(t => t.outerHTML)"
+        )
+    except Exception:
+        # 若 :visible 在某些環境失敗，退回整頁解析，但會印出警告。
+        print("警告：無法取得 visible table，退回 page.content() 解析。")
+        html = page.content()
+        soup = BeautifulSoup(html, "html.parser")
+        return soup.find_all("table")
+
+    tables = []
+
+    for table_html in visible_tables_html:
+        table_soup = BeautifulSoup(table_html, "html.parser")
+        table = table_soup.find("table")
+
+        if table is not None:
+            tables.append(table)
+
+    return tables
+
+
+def parse_detail_table(page, project_name, queue_type, room_type, household_type):
+    tables = get_visible_tables(page)
 
     columns = [
         "抓取日期",
         "社會住宅",
+        "遞補類型",
         "房型",
         "戶別",
         "候補序號",
@@ -121,6 +165,7 @@ def parse_detail_table(page, project_name, room_type, household_type):
             record = {
                 "抓取日期": date.today().strftime("%Y-%m-%d"),
                 "社會住宅": project_name,
+                "遞補類型": queue_type,
                 "房型": room_type,
                 "戶別": household_type,
                 "候補序號": rank_number,
@@ -132,10 +177,11 @@ def parse_detail_table(page, project_name, room_type, household_type):
     return pd.DataFrame(records, columns=columns)
 
 
-def calculate_stats(records_df, project_name, room_type, household_type):
+def calculate_stats(records_df, project_name, queue_type, room_type, household_type):
     base_record = {
         "抓取日期": date.today().strftime("%Y-%m-%d"),
         "社會住宅": project_name,
+        "遞補類型": queue_type,
         "房型": room_type,
         "戶別": household_type,
     }
@@ -174,13 +220,20 @@ def calculate_stats(records_df, project_name, room_type, household_type):
 
 
 def save_stats_history(stats_result_df):
-
     """
     把本次爬到的統計資料，追加到 detail_queue_stats_history.csv。
-    如果同一天、同案場、同房型、同戶別已經存在，就保留最後一次。
+    如果同一天、同案場、同遞補類型、同房型、同戶別已經存在，就保留最後一次。
     """
     if STATS_HISTORY_FILE.exists():
-        old_history_df = pd.read_csv(STATS_HISTORY_FILE)
+        old_history_df = pd.read_csv(STATS_HISTORY_FILE, encoding="utf-8-sig")
+
+        # 舊版 history 沒有遞補類型，不能和新版資料混用。
+        if "遞補類型" not in old_history_df.columns:
+            raise ValueError(
+                "偵測到舊版 detail_queue_stats_history.csv 缺少「遞補類型」。"
+                "請先把舊檔移走或改名，再重新執行爬蟲。"
+            )
+
         history_df = pd.concat(
             [old_history_df, stats_result_df],
             ignore_index=True
@@ -189,12 +242,12 @@ def save_stats_history(stats_result_df):
         history_df = stats_result_df.copy()
 
     history_df = history_df.drop_duplicates(
-        subset=["抓取日期","社會住宅","房型","戶別"],
+        subset=["抓取日期"] + KEY_COLUMNS,
         keep="last"
     )
 
     history_df = history_df.sort_values(
-        ["社會住宅","房型","戶別","抓取日期"]
+        KEY_COLUMNS + ["抓取日期"]
     )
 
     history_df.to_csv(
@@ -204,6 +257,7 @@ def save_stats_history(stats_result_df):
     )
 
     print("已更新歷史統計資料：", STATS_HISTORY_FILE.resolve())
+
 
 def scrape_all_detail_lists():
     project_links_df = load_project_links()
@@ -217,9 +271,10 @@ def scrape_all_detail_lists():
 
         for _, project in project_links_df.iterrows():
             project_name = project["社會住宅"]
+            queue_type = project["遞補類型"]
             detail_url = project["名冊網址"]
 
-            print("正在處理案場：", project_name)
+            print("正在處理案場：", project_name, "/", queue_type)
 
             page.goto(detail_url)
             page.wait_for_timeout(3000)
@@ -227,7 +282,7 @@ def scrape_all_detail_lists():
             has_room_buttons = wait_for_room_buttons(page)
 
             if not has_room_buttons:
-                print("等不到房型按鈕，跳過案場：", project_name)
+                print("等不到房型按鈕，跳過案場：", project_name, "/", queue_type)
                 print("-" * 60)
                 continue
 
@@ -250,6 +305,7 @@ def scrape_all_detail_lists():
                     records_df = parse_detail_table(
                         page,
                         project_name,
+                        queue_type,
                         room_type,
                         household_type
                     )
@@ -257,6 +313,7 @@ def scrape_all_detail_lists():
                     stats = calculate_stats(
                         records_df,
                         project_name,
+                        queue_type,
                         room_type,
                         household_type
                     )
@@ -282,6 +339,7 @@ def scrape_all_detail_lists():
         records_result_df = pd.DataFrame(columns=[
             "抓取日期",
             "社會住宅",
+            "遞補類型",
             "房型",
             "戶別",
             "候補序號",
@@ -301,6 +359,7 @@ def scrape_all_detail_lists():
         index=False,
         encoding="utf-8-sig"
     )
+
     print("已儲存個別名冊資料：", RECORDS_OUTPUT_FILE.resolve())
     print("已儲存統計資料：", STATS_OUTPUT_FILE.resolve())
 
