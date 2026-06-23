@@ -1,220 +1,249 @@
-# 臺中社宅候補追蹤工具
+# 臺中社宅候補查詢工具
 
-這是一個用來追蹤臺中市社會住宅候補名冊變動的自架工具。
+這是一個以 Streamlit 製作的臺中市社會住宅候補查詢工具。
 
-本工具可以：
+使用者可以輸入自己的候補資訊，例如社會住宅、遞補類型、房型、戶別與候補序號，查詢目前公開候補名冊中的位置，並取得粗略的等待時間估算。
 
-* 抓取公開候補名冊
-* 統計各案場、房型、戶別的遞補進度
-* 估算個人候補序號前方仍有多少人
-* 顯示 Streamlit dashboard
-* 產生每日摘要
-* 透過 LINE Messaging API 傳送通知
+本工具不是臺中市政府官方網站，所有查詢與估算結果僅供參考。實際資格審查、通知、選屋與入住時間，仍以臺中市政府住宅發展工程處及官方社會住宅系統公告為準。
 
-本工具不是臺中市政府官方工具，估算結果僅供參考，不代表官方承諾或實際通知結果。
+## 功能
 
----
+目前提供以下功能：
 
-## 專案定位
+* 查詢指定社宅、遞補類型、房型、戶別下的候補狀況
+* 輸入自己的候補序號後，估算本名冊前方待遞補人數
+* 若為「隨到隨辦」名冊，保守納入同案場前置「新案場招租」名冊尚待遞補人數
+* 顯示保守估計前方等待人數
+* 依不同時間基準估算平均每週推進人數與可能遞補完成日期
+* 顯示官方候補資料與名冊概況
+* 透過 GitHub Actions 定期更新公開資料
 
-這個 repository 是 starter 版本，適合使用者 clone 後自行設定、自行執行。
+## 隱私說明
 
-目前不是多人雲端服務，因此不會替使用者保存資料，也不會代替使用者發送 LINE 通知。使用者需要在自己的電腦或伺服器上設定自己的候補資料與 LINE token。
+本工具不需要登入，也不會保存使用者輸入的候補序號或個人資料。
 
----
+使用者在網頁上輸入的資料，只會用於當下查詢與估算，不會寫入資料庫，也不會用於通知、追蹤或其他用途。
 
-## 安裝方式
+## 使用方式
 
-請先安裝 Python 3.11 或更新版本。
+開啟 Streamlit 網頁後，依序選擇：
 
-下載專案後，進入專案資料夾：
+1. 社會住宅
+2. 遞補類型
+3. 房型
+4. 戶別
+5. 我的候補序號
 
-```powershell
-cd social_housing_tracker_starter
-```
+按下「開始查詢」後，系統會顯示：
 
-建議建立虛擬環境：
+* 本名冊前方待遞補人數
+* 前置名冊待遞補人數
+* 保守估計前方等待人數
+* 完整預估表
+* 對應名冊統計
+* 對應候補名冊資料
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-```
+## 估算邏輯簡述
 
-安裝套件：
+本工具的估算採取保守原則。
 
-```powershell
-pip install -r requirements.txt
-```
+### 本名冊前方待遞補人數
 
----
+系統會依照公開候補名冊，計算同一社宅、同一遞補類型、同一房型、同一戶別下，候補序號小於使用者輸入序號，且尚未遞補完成的人數。
 
-## 建立自己的候補資料
+### 前置名冊待遞補人數
 
-本專案不會提供或保存你的私人候補資料。
+若使用者查詢的是「隨到隨辦」名冊，系統會檢查同一社宅、房型、戶別下，是否仍有「新案場招租」名冊尚未遞補完成。
 
-請先複製範例檔：
+若有，這些人數會被視為前置名冊待遞補人數，加入保守估計。
 
-```powershell
-Copy-Item sample_my_applications.csv my_applications.csv
-```
+### 保守估計前方等待人數
 
-然後打開 `my_applications.csv`，改成自己的候補資料。
-
-格式如下：
-
-```csv
-社會住宅,遞補類型,房型,戶別,我的候補序號,營運開始日,備註
-西屯國安一期,隨到隨辦,三房型,一般戶,2,,範例資料，請改成自己的候補資料
-```
-
-欄位說明：
-
-* `社會住宅`：社宅案場名稱
-* `遞補類型`：例如 `新案場招租` 或 `隨到隨辦`
-* `房型`：例如 `一房型`、`二房型`、`三房型`
-* `戶別`：例如 `一般戶`、`關懷戶`
-* `我的候補序號`：你的候補序號
-* `營運開始日`：可留空，目前主要使用 `project_metadata.csv`
-* `備註`：可自行填寫
-
----
-
-## 第一次完整更新
-
-第一次使用時，請執行完整更新：
-
-```powershell
-.\run_full_refresh.bat
-```
-
-完整更新會依序執行：
-
-1. 建立官方名冊連結
-2. 抓取詳細候補名冊
-3. 分析遞補進度
-4. 建立名冊變動事件
-5. 產生每日摘要
-6. 若有設定 LINE 環境變數，則傳送 LINE 通知
-
-如果沒有設定 LINE，程式會略過 LINE 通知，不會因此失敗。
-
----
-
-## 日常更新
-
-之後日常更新可以執行：
-
-```powershell
-.\run_daily_tracker.bat
-```
-
-日常更新不會重新建立官方名冊連結，只會使用既有的 `project_links.csv` 抓取資料。
-
-如果官方新增案場、連結規則改變，或 `project_links.csv` 遺失，請重新執行：
-
-```powershell
-.\run_full_refresh.bat
-```
-
----
-
-## 查看 dashboard
-
-執行：
-
-```powershell
-python -m streamlit run app.py
-```
-
-dashboard 目前包含：
-
-* 我的申請
-* 變動與趨勢
-* 候補設定
-* 官方資料
-* 系統資訊
-
----
-
-## LINE 通知設定
-
-本工具使用 LINE Messaging API，不使用 LINE Notify。
-
-如果要啟用 LINE 通知，需要先建立 LINE 官方帳號與 Messaging API channel，並取得：
-
-* `LINE_CHANNEL_ACCESS_TOKEN`
-* `LINE_RECIPIENT_ID`
-
-請把它們設定成 Windows 使用者環境變數，不要寫進 `.py`、`.bat` 或 GitHub repository。
-
-PowerShell 設定方式：
-
-```powershell
-[Environment]::SetEnvironmentVariable("LINE_CHANNEL_ACCESS_TOKEN", "你的 Channel access token", "User")
-[Environment]::SetEnvironmentVariable("LINE_RECIPIENT_ID", "你的 userId 或 groupId", "User")
-```
-
-設定後，請重新開啟 PowerShell，再測試：
-
-```powershell
-python generate_daily_summary.py
-python send_line_summary.py
-```
-
----
-
-## Windows 工作排程器
-
-若要每日自動執行，可以使用 Windows 工作排程器。
-
-建議動作設定：
-
-程式或指令碼：
+保守估計前方等待人數為：
 
 ```text
-C:\你的專案路徑\run_daily_tracker.bat
+本名冊前方待遞補人數 + 前置名冊待遞補人數
 ```
 
-起始位置：
+### 等待時間預估
+
+系統會依公開資料中的歷史變化，估算不同期間的平均每週推進人數。
+
+目前包含：
+
+* 營運以來
+* 最近一個月
+* 最近三個月
+* 最近六個月
+* 最近一年
+
+若某段期間資料不足，或該期間沒有明確推進，系統會顯示無法估算，而不會任意套用其他期間的速度。
+
+## 資料來源
+
+本工具使用臺中市社會住宅線上申請系統中的公開候補名冊資料進行整理與估算。
+
+資料檔案包含：
 
 ```text
-C:\你的專案路徑
-```
-
-建議每天早上固定執行一次。
-
----
-
-## 不應該 commit 的檔案
-
-以下檔案通常是本機資料、私人資料或自動產生資料，不應該 commit：
-
-```text
-my_applications.csv
-my_application_estimates.csv
+project_links.csv
+project_metadata.csv
 detail_queue_records.csv
 detail_queue_stats.csv
 detail_queue_stats_history.csv
 queue_progress_analysis.csv
 queue_event_log.csv
-daily_queue_summary.txt
-logs/
-.env
-.streamlit/secrets.toml
 ```
 
-本 repository 的 `.gitignore` 已盡量排除這些檔案，但 commit 前仍建議先檢查：
+資料會透過 GitHub Actions 定期重新抓取與更新。
+
+## 專案檔案說明
+
+主要檔案如下：
+
+```text
+query_app.py
+```
+
+Streamlit 公開查詢頁主程式。
+
+```text
+query_estimator.py
+```
+
+候補人數與等待時間估算邏輯。
+
+```text
+build_project_links.py
+```
+
+建立社宅案場與候補名冊連結資料。
+
+```text
+scrape_all_detail_lists.py
+```
+
+抓取各案場詳細候補名冊。
+
+```text
+analyze_queue_progress.py
+```
+
+分析候補名冊推進狀況。
+
+```text
+build_event_log.py
+```
+
+建立候補資料變動紀錄。
+
+```text
+constants.py
+utils.py
+```
+
+共用常數與工具函數。
+
+```text
+.github/workflows/update_queue_data.yml
+```
+
+GitHub Actions 自動更新流程。
+
+## 本機執行
+
+### 1. 建立虛擬環境
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+Windows PowerShell 可使用：
 
 ```powershell
-git status
+.venv\Scripts\Activate.ps1
 ```
 
----
+### 2. 安裝套件
+
+```bash
+pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+### 3. 更新資料
+
+```bash
+python build_project_links.py
+python scrape_all_detail_lists.py
+python analyze_queue_progress.py
+python build_event_log.py
+```
+
+### 4. 啟動查詢網頁
+
+```bash
+python -m streamlit run query_app.py
+```
+
+## 部署到 Streamlit Cloud
+
+Streamlit Cloud 設定：
+
+```text
+Repository: abula56/social_housing_tracker
+Branch: main
+Main file path: query_app.py
+```
+
+部署後，Streamlit Cloud 會讀取 repository 中的 CSV 檔案作為查詢資料來源。
+
+## GitHub Actions 自動更新
+
+本專案包含 GitHub Actions workflow：
+
+```text
+.github/workflows/update_queue_data.yml
+```
+
+它會定期執行：
+
+```bash
+python build_project_links.py
+python scrape_all_detail_lists.py
+python analyze_queue_progress.py
+python build_event_log.py
+```
+
+並將更新後的 CSV 檔案 commit 回 repository。
+
+也可以手動觸發：
+
+```bash
+gh workflow run "Update queue data" --repo abula56/social_housing_tracker --ref main
+```
+
+查看最近執行狀態：
+
+```bash
+gh run list --workflow="update_queue_data.yml" --repo abula56/social_housing_tracker --limit 3
+```
 
 ## 注意事項
 
-本工具依賴臺中市社會住宅公開候補名冊資料。若官方網站格式改變，爬蟲可能需要更新。
+本工具僅依公開資料進行整理與推估，可能受到以下因素影響：
 
-本工具的預估日期只是根據目前資料與歷史推進速度計算，不代表官方實際通知時間。
+* 官方資料更新時間
+* 名冊格式變動
+* 候補人員資格審查結果
+* 放棄、取消、遞補、選屋等行政流程
+* 不同案場實際釋出戶數與作業速度
 
-使用者應以臺中市政府或官方社宅平台公告為準。
+因此，預估日期不應視為保證結果。
+
+如需確認正式候補、資格審查、通知或選屋資訊，請以臺中市政府官方公告與通知為準。
+
+## 授權
+
+本專案目前作為公開查詢工具使用。若引用、修改或再利用，請保留非官方工具與資料來源說明。
