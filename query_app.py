@@ -286,7 +286,7 @@ def estimate_my_applications(
                 history_df=history_df,
                 selected_period_label=period_label,
             )
-            result.insert(0, "筆數", index + 1)
+            result = {"筆數": index + 1, **result}
             results.append(result)
 
     return pd.DataFrame(results)
