@@ -28,6 +28,15 @@ def wait_for_room_buttons(page):
 
     return False
 
+def get_available_room_types(page):
+    available_room_types = []
+
+    for room_type in ROOM_TYPES:
+        if page.get_by_role("button", name=room_type).count() > 0:
+            available_room_types.append(room_type)
+
+    return available_room_types
+
 
 def clean_text(text):
     return re.sub(r"[\s\u3000]+", "", str(text))
@@ -285,7 +294,18 @@ def scrape_all_detail_lists():
                 print("-" * 60)
                 continue
 
-            for room_type in ROOM_TYPES:
+            available_room_types = get_available_room_types(page)
+
+            if not available_room_types:
+
+                print("找不到任何房型按鈕，跳過案場：", project_name, "/", queue_type)
+
+                print("-" * 60)
+
+                continue
+
+            for room_type in available_room_types:
+                
                 print("  房型：", room_type)
 
                 room_clicked = click_filter(page, room_type)
