@@ -1,4 +1,4 @@
-name: Daily private tracker
+name: Update Queue Data
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 jobs:
-  update-private-tracker:
+  update-queue-data:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -71,7 +71,7 @@ jobs:
       - name: Commit updated tracker data
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Update private queue tracker data"
+          commit_message: "Update queue data"
           file_pattern: |
             project_links.csv
             detail_queue_records.csv
