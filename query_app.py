@@ -611,32 +611,162 @@ with tab_my:
             st.divider()
             st.subheader("我的候補估算結果")
 
-            display_columns = [
+            def _to_numeric_series(df: pd.DataFrame, column: str) -> pd.Series:
+                if column not in df.columns:
+                    return pd.Series(dtype="float64")
+                return pd.to_numeric(df[column], errors="coerce")
+
+            def _format_min_waiting(df: pd.DataFrame) -> str:
+                waiting_values = _to_numeric_series(df, "前面約剩幾位")
+                if waiting_values.dropna().empty:
+                    return "無法估算"
+                return f"{int(waiting_values.min())} 人"
+
+            def _format_earliest_date(df: pd.DataFrame) -> str:
+                if "預估遞補完成日期" not in df.columns:
+                    return "無法估算"
+                estimated_dates = pd.to_datetime(
+                    df["預估遞補完成日期"],
+                    errors="coerce",
+                )
+                if estimated_dates.dropna().empty:
+                    return "無法估算"
+                return estimated_dates.min().strftime("%Y-%m-%d")
+
+            preferred_periods = ["最近三個月", "最近六個月", "最近一年", "營運以來"]
+            default_summary_period = next(
+                (period for period in preferred_periods if period in period_labels),
+                period_labels[0],
+            )
+
+            selected_summary_period = st.selectbox(
+                "總覽顯示基準",
+                options=period_labels,
+                index=period_labels.index(default_summary_period),
+                help="上方總覽與主要表格只顯示一種估算基準；下方可展開比較所有基準。",
+            )
+
+            dashboard_df = estimate_df[
+                estimate_df["估算基準"].astype(str) == str(selected_summary_period)
+            ].copy()
+
+            dashboard_df["_預估日期排序"] = pd.to_datetime(
+                dashboard_df.get("預估遞補完成日期"),
+                errors="coerce",
+            )
+            dashboard_df["_等待人數排序"] = _to_numeric_series(
+                dashboard_df,
+                "前面約剩幾位",
+            )
+
+            valid_summary_df = dashboard_df[dashboard_df["_預估日期排序"].notna()].copy()
+            if valid_summary_df.empty:
+                selected_summary_row = None
+            else:
+                selected_summary_row = (
+                    valid_summary_df
+                    .sort_values(["_預估日期排序", "_等待人數排序"], na_position="last")
+                    .iloc[0]
+                )
+
+            st.caption(f"目前估算基準：{selected_summary_period}")
+
+            estimate_col1, estimate_col2, estimate_col3 = st.columns(3)
+
+            if selected_summary_row is None:
+                with estimate_col1:
+                    st.metric("平均每週推進", "無法估算")
+                with estimate_col2:
+                    st.metric("預估剩餘週數", "無法估算")
+                with estimate_col3:
+                    st.metric("預估遞補完成日期", "無法估算")
+            else:
+                selected_application_label = (
+                    f"{selected_summary_row.get('社宅', '')}／"
+                    f"{selected_summary_row.get('房型', '')}／"
+                    f"{selected_summary_row.get('戶別', '')}"
+                )
+
+                with estimate_col1:
+                    st.metric(
+                        "平均每週推進",
+                        selected_summary_row.get("平均每週推進人數") or "無法估算",
+                    )
+                with estimate_col2:
+                    st.metric(
+                        "預估剩餘週數",
+                        selected_summary_row.get("預估剩餘週數") or "無法估算",
+                    )
+                with estimate_col3:
+                    st.metric(
+                        "預估遞補完成日期",
+                        selected_summary_row.get("預估遞補完成日期") or "無法估算",
+                    )
+
+                st.caption(f"上方三項以最早可遞補的申請估算：{selected_application_label}")
+
+            summary_col1, summary_col2, summary_col3 = st.columns(3)
+            with summary_col1:
+                st.metric("估算申請數", f"{len(dashboard_df)} 筆")
+            with summary_col2:
+                st.metric("最少前方等待", _format_min_waiting(dashboard_df))
+            with summary_col3:
+                st.metric("最早預估日期", _format_earliest_date(dashboard_df))
+
+            dashboard_columns = [
                 "筆數",
                 "社宅",
                 "遞補類型",
                 "房型",
                 "戶別",
                 "我的序號",
-                "估算基準",
                 "狀態",
+                "前面約剩幾位",
                 "本名冊前方待遞補人數",
                 "前置名冊待遞補人數",
                 "保守估計前方等待人數",
+                "估算基準",
                 "平均每週推進人數",
                 "預估剩餘週數",
                 "預估遞補完成日期",
                 "資料取得日",
                 "備註",
             ]
-            existing_display_columns = [
-                col for col in display_columns if col in estimate_df.columns
+            existing_dashboard_columns = [
+                col for col in dashboard_columns if col in dashboard_df.columns
             ]
 
             st.dataframe(
-                estimate_df[existing_display_columns],
+                dashboard_df[existing_dashboard_columns],
                 use_container_width=True,
+                hide_index=True,
             )
+
+            with st.expander("比較所有估算基準", expanded=False):
+                comparison_columns = [
+                    "筆數",
+                    "社宅",
+                    "遞補類型",
+                    "房型",
+                    "戶別",
+                    "我的序號",
+                    "估算基準",
+                    "狀態",
+                    "前面約剩幾位",
+                    "平均每週推進人數",
+                    "預估剩餘週數",
+                    "預估遞補完成日期",
+                    "資料取得日",
+                    "備註",
+                ]
+                existing_comparison_columns = [
+                    col for col in comparison_columns if col in estimate_df.columns
+                ]
+                st.dataframe(
+                    estimate_df[existing_comparison_columns],
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
             result_csv = estimate_df.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
@@ -647,6 +777,7 @@ with tab_my:
             )
 
             st.caption(
+                "說明：預估日期只是用目前名冊與歷史推進速度推算，不是官方承諾。"
                 "若狀態顯示找不到名冊資料，通常是社會住宅、遞補類型、房型、戶別其中一欄與公開名冊不完全一致。"
             )
 
