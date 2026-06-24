@@ -8,6 +8,8 @@ from query_estimator import estimate_one_application
 
 
 KEY_COLUMNS = ["社會住宅", "遞補類型", "房型", "戶別"]
+MY_APPLICATION_COLUMNS = [*KEY_COLUMNS, "我的候補序號"]
+OPTIONAL_MY_APPLICATION_COLUMNS = ["備註"]
 
 RECORDS_FILE = Path("detail_queue_records.csv")
 STATS_FILE = Path("detail_queue_stats.csv")
@@ -78,6 +80,20 @@ def sorted_options(df: pd.DataFrame, column: str) -> list[str]:
         return sorted(values, key=lambda x: household_order.get(x, 999))
 
     return sorted(values)
+
+
+def editor_options(source_df: pd.DataFrame, column: str, current_values=None) -> list[str]:
+    options = [""]
+    options.extend(sorted_options(source_df, column))
+
+    if current_values is not None:
+        try:
+            values = pd.Series(current_values).dropna().astype(str).str.strip().tolist()
+        except Exception:
+            values = []
+        options.extend([value for value in values if value])
+
+    return list(dict.fromkeys(options))
 
 
 def get_waiting_count(row: pd.Series) -> int | None:
@@ -161,6 +177,121 @@ def estimate_previous_roster_waiting_count(
     return int(total)
 
 
+def make_my_applications_template(source_df: pd.DataFrame) -> pd.DataFrame:
+    if source_df.empty or any(col not in source_df.columns for col in KEY_COLUMNS):
+        return pd.DataFrame(
+            [
+                {
+                    "社會住宅": "南屯建功1號",
+                    "遞補類型": "隨到隨辦",
+                    "房型": "二房型",
+                    "戶別": "一般戶",
+                    "我的候補序號": 1,
+                    "備註": "範例，請刪除或改成自己的資料",
+                }
+            ]
+        )
+
+    sample = source_df[KEY_COLUMNS].drop_duplicates().head(3).copy()
+    if sample.empty:
+        sample = pd.DataFrame(
+            [
+                {
+                    "社會住宅": "南屯建功1號",
+                    "遞補類型": "隨到隨辦",
+                    "房型": "二房型",
+                    "戶別": "一般戶",
+                }
+            ]
+        )
+
+    sample["我的候補序號"] = 1
+    sample["備註"] = "範例，請刪除或改成自己的資料"
+    return sample[[*MY_APPLICATION_COLUMNS, "備註"]]
+
+
+def clean_my_applications_df(my_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    errors = []
+
+    if my_df is None or my_df.empty:
+        return pd.DataFrame(columns=[*MY_APPLICATION_COLUMNS, "備註"]), errors
+
+    my_df = my_df.copy()
+    my_df.columns = [str(col).strip() for col in my_df.columns]
+
+    missing = [col for col in MY_APPLICATION_COLUMNS if col not in my_df.columns]
+    if missing:
+        errors.append(f"上傳檔案缺少必要欄位：{', '.join(missing)}")
+        return pd.DataFrame(columns=[*MY_APPLICATION_COLUMNS, "備註"]), errors
+
+    if "備註" not in my_df.columns:
+        my_df["備註"] = ""
+
+    keep_columns = [*MY_APPLICATION_COLUMNS, "備註"]
+    my_df = my_df[keep_columns]
+
+    for col in KEY_COLUMNS + ["備註"]:
+        my_df[col] = my_df[col].fillna("").astype(str).str.strip()
+
+    my_df["我的候補序號"] = pd.to_numeric(
+        my_df["我的候補序號"],
+        errors="coerce",
+    )
+
+    required_text_filled = my_df[KEY_COLUMNS].apply(
+        lambda row: any(str(value).strip() for value in row),
+        axis=1,
+    )
+    rank_filled = my_df["我的候補序號"].notna()
+    my_df = my_df[required_text_filled | rank_filled].copy()
+
+    if my_df.empty:
+        return pd.DataFrame(columns=keep_columns), errors
+
+    incomplete_rows = my_df[
+        my_df[KEY_COLUMNS].eq("").any(axis=1)
+        | my_df["我的候補序號"].isna()
+        | (my_df["我的候補序號"] < 1)
+    ]
+
+    if not incomplete_rows.empty:
+        errors.append(
+            "有資料列缺少社會住宅、遞補類型、房型、戶別，或候補序號不是大於等於 1 的數字。"
+        )
+
+    valid_df = my_df.drop(incomplete_rows.index).copy()
+    if valid_df.empty:
+        return pd.DataFrame(columns=keep_columns), errors
+
+    valid_df["我的候補序號"] = valid_df["我的候補序號"].astype(int)
+    return valid_df.reset_index(drop=True), errors
+
+
+def estimate_my_applications(
+    my_df: pd.DataFrame,
+    records_df: pd.DataFrame,
+    stats_df: pd.DataFrame,
+    metadata_df: pd.DataFrame,
+    history_df: pd.DataFrame,
+    period_labels: list[str],
+) -> pd.DataFrame:
+    results = []
+    for index, my_row in my_df.iterrows():
+        for period_label in period_labels:
+            result = estimate_one_application(
+                my_row=my_row,
+                records_df=records_df,
+                status_df=stats_df,
+                metadata_df=metadata_df,
+                history_df=history_df,
+                selected_period_label=period_label,
+            )
+            result.insert(0, "筆數", index + 1)
+            results.append(result)
+
+    return pd.DataFrame(results)
+
+
 records_df = load_csv(RECORDS_FILE)
 stats_df = load_csv(STATS_FILE)
 history_df = load_csv(HISTORY_FILE)
@@ -190,7 +321,7 @@ if missing_key_columns:
     st.stop()
 
 
-tab_query, tab_stats, tab_about = st.tabs(["🏠 候補查詢", "📊 名冊概況", "ℹ️ 說明"])
+tab_query, tab_my, tab_stats, tab_about = st.tabs(["🏠 候補查詢", "📁 我的候補估算", "📊 名冊概況", "ℹ️ 說明"])
 
 with tab_query:
     st.subheader("輸入候補資訊")
@@ -347,6 +478,179 @@ with tab_query:
             "「新案場招租」待遞補人數視為前置等待，以避免過度樂觀。"
         )
 
+with tab_my:
+    st.subheader("上傳或建立我的候補資料")
+
+    st.info(
+        "這個功能只在當次瀏覽器 session 使用你上傳或輸入的資料進行估算，"
+        "不會把 my_applications.csv 寫入 GitHub，也不會保存到伺服器。"
+    )
+
+    template_df = make_my_applications_template(source_df)
+    template_csv = template_df.to_csv(index=False).encode("utf-8-sig")
+
+    st.download_button(
+        "下載 my_applications.csv 範本",
+        data=template_csv,
+        file_name="my_applications_template.csv",
+        mime="text/csv",
+    )
+
+    uploaded_my_file = st.file_uploader(
+        "上傳 my_applications.csv",
+        type=["csv"],
+        help="必要欄位：社會住宅、遞補類型、房型、戶別、我的候補序號。備註欄可有可無。",
+    )
+
+    uploaded_my_df = pd.DataFrame(columns=[*MY_APPLICATION_COLUMNS, "備註"])
+    if uploaded_my_file is not None:
+        try:
+            uploaded_my_df = pd.read_csv(uploaded_my_file)
+        except Exception as exc:
+            st.error(f"CSV 讀取失敗：{exc}")
+            uploaded_my_df = pd.DataFrame(columns=[*MY_APPLICATION_COLUMNS, "備註"])
+
+    st.markdown("### 或直接在表格輸入")
+    st.caption("可以新增多列；若已上傳 CSV，表格會先帶入上傳內容，你也可以再修改後查詢。")
+
+    if uploaded_my_df.empty:
+        editor_initial_df = pd.DataFrame(
+            [
+                {
+                    "社會住宅": "",
+                    "遞補類型": "",
+                    "房型": "",
+                    "戶別": "",
+                    "我的候補序號": None,
+                    "備註": "",
+                }
+            ]
+        )
+    else:
+        editor_initial_df = uploaded_my_df.copy()
+        for col in [*MY_APPLICATION_COLUMNS, "備註"]:
+            if col not in editor_initial_df.columns:
+                editor_initial_df[col] = ""
+        editor_initial_df = editor_initial_df[[*MY_APPLICATION_COLUMNS, "備註"]]
+
+    editor_initial_df["我的候補序號"] = pd.to_numeric(
+        editor_initial_df["我的候補序號"],
+        errors="coerce",
+    )
+
+    edited_my_df = st.data_editor(
+        editor_initial_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "社會住宅": st.column_config.SelectboxColumn(
+                "社會住宅",
+                options=editor_options(source_df, "社會住宅", editor_initial_df["社會住宅"]),
+            ),
+            "遞補類型": st.column_config.SelectboxColumn(
+                "遞補類型",
+                options=editor_options(source_df, "遞補類型", editor_initial_df["遞補類型"]),
+            ),
+            "房型": st.column_config.SelectboxColumn(
+                "房型",
+                options=editor_options(source_df, "房型", editor_initial_df["房型"]),
+            ),
+            "戶別": st.column_config.SelectboxColumn(
+                "戶別",
+                options=editor_options(source_df, "戶別", editor_initial_df["戶別"]),
+            ),
+            "我的候補序號": st.column_config.NumberColumn(
+                "我的候補序號",
+                min_value=1,
+                step=1,
+                format="%d",
+            ),
+            "備註": st.column_config.TextColumn("備註"),
+        },
+        key="my_applications_editor",
+    )
+
+    cleaned_my_df, my_errors = clean_my_applications_df(edited_my_df)
+
+    for error in my_errors:
+        st.warning(error)
+
+    if not cleaned_my_df.empty:
+        st.markdown("### 本次候補資料")
+        st.dataframe(cleaned_my_df, use_container_width=True)
+
+        cleaned_csv = cleaned_my_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "下載本次 my_applications.csv",
+            data=cleaned_csv,
+            file_name="my_applications.csv",
+            mime="text/csv",
+        )
+
+    period_labels = st.multiselect(
+        "估算基準",
+        options=list(PERIOD_OPTIONS.keys()),
+        default=list(PERIOD_OPTIONS.keys()),
+    )
+
+    if st.button("估算我的候補資料", type="primary"):
+        if cleaned_my_df.empty:
+            st.error("請先上傳或輸入至少一筆完整候補資料。")
+        elif not period_labels:
+            st.error("請至少選擇一個估算基準。")
+        else:
+            estimate_df = estimate_my_applications(
+                my_df=cleaned_my_df,
+                records_df=records_df,
+                stats_df=stats_df,
+                metadata_df=metadata_df,
+                history_df=history_df,
+                period_labels=period_labels,
+            )
+
+            st.divider()
+            st.subheader("我的候補估算結果")
+
+            display_columns = [
+                "筆數",
+                "社宅",
+                "遞補類型",
+                "房型",
+                "戶別",
+                "我的序號",
+                "估算基準",
+                "狀態",
+                "本名冊前方待遞補人數",
+                "前置名冊待遞補人數",
+                "保守估計前方等待人數",
+                "平均每週推進人數",
+                "預估剩餘週數",
+                "預估遞補完成日期",
+                "資料取得日",
+                "備註",
+            ]
+            existing_display_columns = [
+                col for col in display_columns if col in estimate_df.columns
+            ]
+
+            st.dataframe(
+                estimate_df[existing_display_columns],
+                use_container_width=True,
+            )
+
+            result_csv = estimate_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "下載估算結果 CSV",
+                data=result_csv,
+                file_name="my_application_estimates.csv",
+                mime="text/csv",
+            )
+
+            st.caption(
+                "若狀態顯示找不到名冊資料，通常是社會住宅、遞補類型、房型、戶別其中一欄與公開名冊不完全一致。"
+            )
+
+
 with tab_stats:
     st.subheader("目前名冊概況")
 
@@ -366,7 +670,8 @@ with tab_about:
         ### 注意事項
 
         - 本工具不是臺中市政府官方網站。
-        - 本工具不會保存使用者輸入的資料。
+        - 本工具不會保存使用者輸入或上傳的資料。
+        - 「我的候補估算」只在當次 session 使用上傳的 my_applications.csv，不會寫入 GitHub 或伺服器。
         - 本工具只依公開候補名冊推估，不代表官方遞補結果。
         - 如果短期速度無法估算，可能代表近期名冊沒有變動，或歷史資料不足。
         - 實際遞補、資格審查、選屋與入住時間，仍以官方公告與通知為準。
