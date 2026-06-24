@@ -1,5 +1,9 @@
 # 臺中社宅候補查詢工具
 
+🌐 線上入口頁：https://abula56.github.io/social_housing_tracker/
+
+🔎 線上查詢工具：https://taichungsocialhousingtracker.streamlit.app
+
 這是一個以 Streamlit 製作的臺中市社會住宅候補查詢工具。
 
 使用者可以輸入自己的候補資訊，例如社會住宅、遞補類型、房型、戶別與候補序號，查詢目前公開候補名冊中的位置，並取得粗略的等待時間估算。
