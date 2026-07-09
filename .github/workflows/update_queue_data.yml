@@ -1,4 +1,4 @@
-name: Update Queue Data
+name: Update queue data
 
 on:
   workflow_dispatch:
@@ -6,21 +6,18 @@ on:
       refresh_links:
         description: "Also rebuild project_links.csv"
         required: false
-        default: false
+        default: true
         type: boolean
 
   schedule:
     # Taiwan 09:30 = UTC 01:30
-    # Monday-Saturday: daily tracker only
-    - cron: "30 1 * * 1-6"
-    # Sunday: rebuild project links, then run tracker
-    - cron: "30 1 * * 0"
+    - cron: "30 1 * * *"
 
 permissions:
   contents: write
 
 jobs:
-  update-queue-data:
+  update-data:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -46,21 +43,59 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-playwright-
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Install Playwright browser
-        run: |
           python -m playwright install --with-deps chromium
 
       - name: Build official project links
-        if: ${{ (github.event_name == 'schedule' && github.event.schedule == '30 1 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.refresh_links) }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.refresh_links) }}
         run: python build_project_links.py
 
       - name: Scrape detail queue lists
         run: python scrape_all_detail_lists.py
+
+      - name: Debug after scrape
+        run: |
+          echo "=== current repo ==="
+          pwd
+          git remote -v
+          git branch --show-current
+          git rev-parse HEAD
+
+          echo "=== file dates after scrape ==="
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          for file in [
+              "detail_queue_records.csv",
+              "detail_queue_stats.csv",
+              "detail_queue_stats_history.csv",
+          ]:
+              print("\n===", file, "===")
+              p = Path(file)
+              print("exists:", p.exists())
+              if not p.exists():
+                  continue
+
+              df = pd.read_csv(p, encoding="utf-8-sig")
+              print("shape:", df.shape)
+              print("columns:", df.columns.tolist())
+
+              if "抓取日期" in df.columns:
+                  print(
+                      "抓取日期:",
+                      df["抓取日期"].dropna().astype(str).drop_duplicates().tail(20).to_list()
+                  )
+          PY
+
+          echo "=== git status after scrape ==="
+          git status --short
+
+          echo "=== git diff stat after scrape ==="
+          git diff --stat
 
       - name: Analyze queue progress
         run: python analyze_queue_progress.py
@@ -68,15 +103,61 @@ jobs:
       - name: Build event log
         run: python build_event_log.py
 
-      - name: Commit updated tracker data
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Update queue data"
-          file_pattern: |
-            project_links.csv
-            detail_queue_records.csv
-            detail_queue_stats.csv
-            detail_queue_stats_history.csv
-            queue_progress_analysis.csv
-            queue_event_log.csv
-            daily_queue_summary.txt
+      - name: Debug before commit
+        run: |
+          echo "=== git status before commit ==="
+          git status --short
+
+          echo "=== git diff stat before commit ==="
+          git diff --stat
+
+          echo "=== file dates before commit ==="
+          python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          for file in [
+              "detail_queue_records.csv",
+              "detail_queue_stats.csv",
+              "detail_queue_stats_history.csv",
+              "queue_progress_analysis.csv",
+              "queue_event_log.csv",
+          ]:
+              print("\n===", file, "===")
+              p = Path(file)
+              print("exists:", p.exists())
+              if not p.exists():
+                  continue
+
+              df = pd.read_csv(p, encoding="utf-8-sig")
+              print("shape:", df.shape)
+
+              for col in ["抓取日期", "事件日期"]:
+                  if col in df.columns:
+                      print(
+                          col + ":",
+                          df[col].dropna().astype(str).drop_duplicates().tail(20).to_list()
+                      )
+          PY
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add project_links.csv
+          git add detail_queue_records.csv
+          git add detail_queue_stats.csv
+          git add detail_queue_stats_history.csv
+          git add queue_progress_analysis.csv
+          git add queue_event_log.csv
+
+          echo "=== staged changes ==="
+          git status --short
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "Update queue data"
+            git push origin HEAD:main
+          fi
