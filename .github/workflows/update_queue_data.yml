@@ -16,6 +16,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: update-queue-data
+  cancel-in-progress: false
+
 jobs:
   update-data:
     runs-on: ubuntu-latest
@@ -55,6 +59,250 @@ jobs:
 
       - name: Scrape detail queue lists
         run: python scrape_all_detail_lists.py
+
+      - name: Validate scraped data
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import io
+          import subprocess
+
+          import pandas as pd
+
+
+          REQUIRED_FILES = {
+              "project_links.csv": {
+                  "minimum_rows": 5,
+                  "required_columns": {
+                      "社會住宅",
+                      "遞補類型",
+                      "名冊網址",
+                  },
+              },
+              "detail_queue_records.csv": {
+                  "minimum_rows": 10_000,
+                  "required_columns": {
+                      "抓取日期",
+                      "社會住宅",
+                      "遞補類型",
+                      "房型",
+                      "戶別",
+                      "候補序號",
+                      "遞補狀態",
+                  },
+              },
+              "detail_queue_stats.csv": {
+                  "minimum_rows": 10,
+                  "required_columns": {
+                      "抓取日期",
+                      "社會住宅",
+                      "遞補類型",
+                      "房型",
+                      "戶別",
+                      "已遞補人數",
+                      "已放棄人數",
+                      "待遞補人數",
+                      "名冊總人數",
+                  },
+              },
+          }
+
+          MIN_RETENTION_RATIO = {
+              "project_links.csv": 0.70,
+              "detail_queue_records.csv": 0.70,
+              "detail_queue_stats.csv": 0.70,
+          }
+
+
+          def read_csv_from_head(filename: str):
+              result = subprocess.run(
+                  ["git", "show", f"HEAD:{filename}"],
+                  capture_output=True,
+                  check=False,
+              )
+
+              if result.returncode != 0:
+                  return None
+
+              return pd.read_csv(
+                  io.BytesIO(result.stdout),
+                  encoding="utf-8-sig",
+              )
+
+
+          failures = []
+
+          for filename, rules in REQUIRED_FILES.items():
+              path = Path(filename)
+
+              if not path.exists():
+                  failures.append(f"{filename} 不存在")
+                  continue
+
+              try:
+                  current_df = pd.read_csv(
+                      path,
+                      encoding="utf-8-sig",
+                  )
+              except Exception as error:
+                  failures.append(
+                      f"{filename} 無法讀取：{error}"
+                  )
+                  continue
+
+              row_count = len(current_df)
+              print(f"{filename}: {row_count:,} rows")
+
+              if row_count < rules["minimum_rows"]:
+                  failures.append(
+                      f"{filename} 只有 {row_count:,} 列，"
+                      f"低於安全門檻 {rules['minimum_rows']:,} 列"
+                  )
+
+              missing_columns = (
+                  rules["required_columns"]
+                  - set(current_df.columns)
+              )
+
+              if missing_columns:
+                  failures.append(
+                      f"{filename} 缺少必要欄位："
+                      + ", ".join(sorted(missing_columns))
+                  )
+
+              previous_df = read_csv_from_head(filename)
+
+              if previous_df is not None and len(previous_df) > 0:
+                  retention_ratio = row_count / len(previous_df)
+                  minimum_ratio = MIN_RETENTION_RATIO[filename]
+
+                  print(
+                      f"{filename}: previous={len(previous_df):,}, "
+                      f"retention={retention_ratio:.1%}"
+                  )
+
+                  if retention_ratio < minimum_ratio:
+                      failures.append(
+                          f"{filename} 本次只有 {row_count:,} 列，"
+                          f"上一版有 {len(previous_df):,} 列，"
+                          f"僅保留 {retention_ratio:.1%}，"
+                          f"低於安全門檻 {minimum_ratio:.0%}"
+                      )
+
+          records_path = Path("detail_queue_records.csv")
+
+          if records_path.exists():
+              try:
+                  records_df = pd.read_csv(
+                      records_path,
+                      encoding="utf-8-sig",
+                  )
+
+                  if {
+                      "社會住宅",
+                      "遞補類型",
+                      "房型",
+                      "戶別",
+                  }.issubset(records_df.columns):
+                      project_count = (
+                          records_df["社會住宅"]
+                          .dropna()
+                          .nunique()
+                      )
+                      queue_count = (
+                          records_df[
+                              [
+                                  "社會住宅",
+                                  "遞補類型",
+                                  "房型",
+                                  "戶別",
+                              ]
+                          ]
+                          .drop_duplicates()
+                          .shape[0]
+                      )
+
+                      print(
+                          "detail_queue_records.csv: "
+                          f"projects={project_count}, "
+                          f"queues={queue_count}"
+                      )
+
+                      if project_count < 5:
+                          failures.append(
+                              "detail_queue_records.csv "
+                              f"只含 {project_count} 個案場"
+                          )
+
+                      if queue_count < 5:
+                          failures.append(
+                              "detail_queue_records.csv "
+                              f"只含 {queue_count} 組名冊"
+                          )
+              except Exception as error:
+                  failures.append(
+                      "detail_queue_records.csv "
+                      f"進階驗證失敗：{error}"
+                  )
+
+          links_path = Path("project_links.csv")
+
+          if links_path.exists():
+              try:
+                  links_df = pd.read_csv(
+                      links_path,
+                      encoding="utf-8-sig",
+                  )
+
+                  if "名冊網址" in links_df.columns:
+                      urls = (
+                          links_df["名冊網址"]
+                          .astype("string")
+                          .str.strip()
+                      )
+
+                      invalid_url_mask = (
+                          urls.isna()
+                          | ~urls.str.startswith(
+                              ("http://", "https://"),
+                              na=False,
+                          )
+                      )
+
+                      if invalid_url_mask.any():
+                          failures.append(
+                              "project_links.csv 含無效網址"
+                          )
+
+                      home_url = (
+                          "https://17zu.taichung.gov.tw/"
+                          "Portal/index"
+                      )
+
+                      if (
+                          urls.str.rstrip("/")
+                          == home_url.rstrip("/")
+                      ).any():
+                          failures.append(
+                              "project_links.csv "
+                              "含仍停留在首頁的網址"
+                          )
+              except Exception as error:
+                  failures.append(
+                      f"project_links.csv 網址驗證失敗：{error}"
+                  )
+
+          if failures:
+              print("\n資料驗證失敗：")
+
+              for failure in failures:
+                  print(f"- {failure}")
+
+              raise SystemExit(1)
+
+          print("\n資料驗證通過，可以繼續分析與提交。")
+          PY
 
       - name: Debug after scrape
         run: |
@@ -138,6 +386,59 @@ jobs:
                           col + ":",
                           df[col].dropna().astype(str).drop_duplicates().tail(20).to_list()
                       )
+          PY
+
+      - name: Validate generated outputs
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          import pandas as pd
+
+
+          checks = {
+              "queue_progress_analysis.csv": 1,
+              "queue_event_log.csv": 0,
+          }
+
+          failures = []
+
+          for filename, minimum_rows in checks.items():
+              path = Path(filename)
+
+              if not path.exists():
+                  failures.append(f"{filename} 不存在")
+                  continue
+
+              try:
+                  df = pd.read_csv(
+                      path,
+                      encoding="utf-8-sig",
+                  )
+              except Exception as error:
+                  failures.append(
+                      f"{filename} 無法讀取：{error}"
+                  )
+                  continue
+
+              print(f"{filename}: {len(df):,} rows")
+
+              if len(df) < minimum_rows:
+                  failures.append(
+                      f"{filename} 只有 {len(df):,} 列，"
+                      f"低於安全門檻 {minimum_rows:,} 列"
+                  )
+
+          if failures:
+              print("\n衍生資料驗證失敗：")
+
+              for failure in failures:
+                  print(f"- {failure}")
+
+              raise SystemExit(1)
+
+          print("\n衍生資料驗證通過。")
           PY
 
       - name: Commit updated data
