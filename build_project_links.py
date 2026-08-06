@@ -14,6 +14,11 @@ QUEUE_TYPES = ["新案場招租", "隨到隨辦", "遞補招租"]
 ROOM_TYPES = ["一房型", "二房型", "三房型"]
 HOUSEHOLD_TYPES = ["一般戶", "關懷戶"]
 
+# 資料品質安全門檻：抓取異常時絕不覆蓋上一版正常資料。
+MIN_LINK_COUNT = 5
+MIN_PROJECT_COUNT = 3
+MIN_RETENTION_RATIO = 0.70
+
 
 def clean_text(text):
     return re.sub(r"[\s\u3000]+", "", str(text))
@@ -157,6 +162,130 @@ def get_project_link_records(page):
     return records
 
 
+
+def validate_project_links(df: pd.DataFrame) -> None:
+    """驗證本次名冊連結資料，異常時阻止覆蓋既有檔案。"""
+    missing_columns = [
+        column
+        for column in PROJECT_LINK_COLUMNS
+        if column not in df.columns
+    ]
+
+    if missing_columns:
+        raise RuntimeError(
+            "本次 project_links 資料缺少必要欄位："
+            + ", ".join(missing_columns)
+        )
+
+    if df.empty:
+        raise RuntimeError(
+            "本次沒有取得任何名冊連結。"
+            "為避免空資料覆蓋既有 project_links.csv，已中止更新。"
+        )
+
+    link_count = len(df)
+    project_count = df["社會住宅"].nunique()
+
+    if link_count < MIN_LINK_COUNT:
+        raise RuntimeError(
+            f"本次只取得 {link_count} 筆名冊連結，"
+            f"低於安全門檻 {MIN_LINK_COUNT} 筆。"
+            "中止更新並保留既有資料。"
+        )
+
+    if project_count < MIN_PROJECT_COUNT:
+        raise RuntimeError(
+            f"本次只取得 {project_count} 個案場，"
+            f"低於安全門檻 {MIN_PROJECT_COUNT} 個。"
+            "中止更新並保留既有資料。"
+        )
+
+    normalized_urls = df["名冊網址"].astype("string").str.strip()
+
+    invalid_url_mask = (
+        normalized_urls.isna()
+        | ~normalized_urls.str.startswith(
+            ("http://", "https://"),
+            na=False,
+        )
+    )
+
+    if invalid_url_mask.any():
+        invalid_rows = df.loc[
+            invalid_url_mask,
+            ["社會住宅", "遞補類型", "名冊網址"],
+        ]
+
+        raise RuntimeError(
+            "發現無效名冊網址，停止更新：\n"
+            + invalid_rows.to_string(index=False)
+        )
+
+    home_url_mask = normalized_urls.str.rstrip("/") == HOME_URL.rstrip("/")
+
+    if home_url_mask.any():
+        home_rows = df.loc[
+            home_url_mask,
+            ["社會住宅", "遞補類型", "名冊網址"],
+        ]
+
+        raise RuntimeError(
+            "部分名冊網址仍停留在首頁，表示點擊或導向失敗：\n"
+            + home_rows.to_string(index=False)
+        )
+
+    duplicate_mask = df.duplicated(
+        subset=["社會住宅", "遞補類型"],
+        keep=False,
+    )
+
+    if duplicate_mask.any():
+        duplicate_rows = df.loc[
+            duplicate_mask,
+            ["社會住宅", "遞補類型", "名冊網址"],
+        ].sort_values(["社會住宅", "遞補類型"])
+
+        raise RuntimeError(
+            "發現重複案場／遞補類型，停止更新：\n"
+            + duplicate_rows.to_string(index=False)
+        )
+
+    if OUTPUT_FILE.exists():
+        previous_df = pd.read_csv(
+            OUTPUT_FILE,
+            encoding="utf-8-sig",
+        )
+        previous_count = len(previous_df)
+
+        if previous_count > 0:
+            retention_ratio = link_count / previous_count
+
+            if retention_ratio < MIN_RETENTION_RATIO:
+                raise RuntimeError(
+                    f"本次只有 {link_count} 筆連結，"
+                    f"舊資料有 {previous_count} 筆，"
+                    f"僅保留 {retention_ratio:.1%}。"
+                    "下降超過 30%，疑似官方頁面或導向異常；"
+                    "中止更新並保留既有資料。"
+                )
+
+
+def atomic_write_csv(df: pd.DataFrame, output_file: Path) -> None:
+    """先完整寫入暫存檔，再原子替換正式 CSV。"""
+    temp_file = output_file.with_suffix(output_file.suffix + ".tmp")
+
+    try:
+        df.to_csv(
+            temp_file,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        temp_file.replace(output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+
 def build_project_links():
     records = []
 
@@ -224,11 +353,8 @@ def build_project_links():
         columns=PROJECT_LINK_COLUMNS,
     )
 
-    df.to_csv(
-        OUTPUT_FILE,
-        index=False,
-        encoding="utf-8-sig"
-    )
+    validate_project_links(df)
+    atomic_write_csv(df, OUTPUT_FILE)
 
     print("已儲存：", OUTPUT_FILE.resolve())
     print(df)
