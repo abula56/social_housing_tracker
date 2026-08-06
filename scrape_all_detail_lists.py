@@ -1,6 +1,8 @@
 from datetime import date
 from pathlib import Path
+import os
 import re
+import tempfile
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -18,6 +20,12 @@ STATS_HISTORY_FILE = BASE_DIR / "detail_queue_stats_history.csv"
 
 ROOM_TYPES = ["一房型", "二房型", "三房型"]
 HOUSEHOLD_TYPES = ["一般戶", "關懷戶"]
+
+# 資料品質安全門檻：抓取異常時絕不覆蓋上一版正常資料。
+MIN_RECORD_COUNT = 10_000
+MIN_PROJECT_COUNT = 5
+MIN_QUEUE_COUNT = 5
+MIN_RETENTION_RATIO = 0.70
 
 STATS_COLUMNS = [
     "抓取日期",
@@ -551,6 +559,104 @@ def save_stats_history(
     )
 
 
+
+def validate_scraped_data(
+    records_df: pd.DataFrame,
+    stats_df: pd.DataFrame,
+) -> None:
+    """驗證本次抓取結果；任何異常都中止，保留既有正式 CSV。"""
+    missing_record_columns = [
+        column for column in RECORD_COLUMNS if column not in records_df.columns
+    ]
+    if missing_record_columns:
+        raise RuntimeError(
+            "本次明細資料缺少必要欄位："
+            + ", ".join(missing_record_columns)
+        )
+
+    missing_stats_columns = [
+        column for column in STATS_COLUMNS if column not in stats_df.columns
+    ]
+    if missing_stats_columns:
+        raise RuntimeError(
+            "本次統計資料缺少必要欄位："
+            + ", ".join(missing_stats_columns)
+        )
+
+    record_count = len(records_df)
+    if record_count < MIN_RECORD_COUNT:
+        raise RuntimeError(
+            f"本次只抓到 {record_count:,} 筆候補明細，"
+            f"低於安全門檻 {MIN_RECORD_COUNT:,} 筆。"
+            "疑似官方網站、連結或爬蟲異常；中止更新並保留舊資料。"
+        )
+
+    project_count = records_df["社會住宅"].dropna().nunique()
+    if project_count < MIN_PROJECT_COUNT:
+        raise RuntimeError(
+            f"本次只抓到 {project_count} 個案場，"
+            f"低於安全門檻 {MIN_PROJECT_COUNT} 個。"
+            "中止更新並保留舊資料。"
+        )
+
+    queue_count = records_df[KEY_COLUMNS].drop_duplicates().shape[0]
+    if queue_count < MIN_QUEUE_COUNT:
+        raise RuntimeError(
+            f"本次只抓到 {queue_count} 組名冊，"
+            f"低於安全門檻 {MIN_QUEUE_COUNT} 組。"
+            "中止更新並保留舊資料。"
+        )
+
+    if RECORDS_OUTPUT_FILE.exists():
+        previous_df = pd.read_csv(
+            RECORDS_OUTPUT_FILE,
+            encoding="utf-8-sig",
+        )
+        previous_count = len(previous_df)
+
+        if previous_count > 0:
+            retention_ratio = record_count / previous_count
+            if retention_ratio < MIN_RETENTION_RATIO:
+                raise RuntimeError(
+                    f"本次資料量為 {record_count:,} 筆，"
+                    f"上一版為 {previous_count:,} 筆，"
+                    f"僅保留 {retention_ratio:.1%}；"
+                    f"低於安全門檻 {MIN_RETENTION_RATIO:.0%}。"
+                    "疑似部分抓取失敗；中止更新並保留舊資料。"
+                )
+
+    print(
+        "資料品質驗證通過：",
+        f"{record_count:,} 筆明細、",
+        f"{project_count} 個案場、",
+        f"{queue_count} 組名冊。",
+    )
+
+
+def atomic_write_csv(df: pd.DataFrame, output_path: Path) -> None:
+    """先寫入同目錄暫存檔，成功後再原子替換正式檔。"""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8-sig",
+            newline="",
+            suffix=".tmp",
+            prefix=f".{output_path.name}.",
+            dir=output_path.parent,
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            df.to_csv(temp_file, index=False)
+
+        os.replace(temp_path, output_path)
+    except Exception:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+        raise
+
 def scrape_all_detail_lists():
     """抓取所有案場的個別名冊與統計資料。"""
     project_links_df = load_project_links()
@@ -664,19 +770,26 @@ def scrape_all_detail_lists():
 
         browser.close()
 
-    if all_records:
-        records_result_df = pd.concat(
-            all_records,
-            ignore_index=True,
+    if not all_records:
+        raise RuntimeError(
+            "本次沒有取得任何候補名冊結果。"
+            "中止更新並保留既有 detail_queue_records.csv。"
         )
-    else:
-        records_result_df = pd.DataFrame(
-            columns=RECORD_COLUMNS
-        )
+
+    records_result_df = pd.concat(
+        all_records,
+        ignore_index=True,
+    )
 
     actual_stats_df = pd.DataFrame(
         all_stats,
         columns=STATS_COLUMNS,
+    )
+
+    # 在碰觸任何正式輸出檔之前完成品質驗證。
+    validate_scraped_data(
+        records_df=records_result_df,
+        stats_df=actual_stats_df,
     )
 
     # 必須在覆寫 detail_queue_stats.csv 之前讀取舊檔。
@@ -684,17 +797,9 @@ def scrape_all_detail_lists():
         actual_stats_df
     )
 
-    records_result_df.to_csv(
-        RECORDS_OUTPUT_FILE,
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    output_stats_df.to_csv(
-        STATS_OUTPUT_FILE,
-        index=False,
-        encoding="utf-8-sig",
-    )
+    # 採原子替換：暫存檔完整寫入後，才取代正式資料。
+    atomic_write_csv(records_result_df, RECORDS_OUTPUT_FILE)
+    atomic_write_csv(output_stats_df, STATS_OUTPUT_FILE)
 
     print(
         "已儲存個別名冊資料：",
